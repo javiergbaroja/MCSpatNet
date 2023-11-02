@@ -1,6 +1,6 @@
 import matplotlib
 matplotlib.use('Agg') # set the backend before importing pyplot
-
+# os.environ['R_HOME'] = '/software.el7/software/R/4.1.0-foss-2021a/lib64/R'
 
 import pandas as pd
 import numpy as np
@@ -20,13 +20,23 @@ import matplotlib.pyplot as plt
 # !pip install rpy2
 # r("install.packages('spatstat', repos = \"https://cloud.r-project.org\")")
 
+def importr_tryhard(packname, contriburl):
+    utils = importr('utils')
+    #  try:
+    #      rpack = importr(packname)
+    #  except RRuntimeError:
+    utils.install_packages(packname, contriburl = contriburl, dependencies = True)
+    rpack = importr(packname)
+    return rpack
+
 
 # In[310]:
 
 
 pandas2ri.activate()
 base = importr('base')
-spatstat = importr('spatstat')
+spatstat_geom = importr(name='spatstat.geom', lib_loc='/storage/homefs/jg23p152/R/x86_64-pc-linux-gnu-library/4.1')
+spatstat_explore = importr(name='spatstat.explore', lib_loc='/storage/homefs/jg23p152/R/x86_64-pc-linux-gnu-library/4.1')
 rlist = ri.baseenv['list']
 rnull = ri.NULL
 rcmd = pr.R(use_numpy=True)
@@ -57,8 +67,8 @@ def ppp(x, y, marks, window_xrange=None, window_yrange=None):
     if not window_yrange:
         window_yrange=rfc([robj.r.min(rfc(y)), robj.r.max(rfc(y))])
         
-    pp['ppp'] = spatstat.ppp(x=rfc(x), y=rfc(y), 
-                             window=spatstat.owin(xrange=window_xrange, 
+    pp['ppp'] = spatstat_geom.ppp(x=rfc(x), y=rfc(y), 
+                             window=spatstat_geom.owin(xrange=window_xrange, 
                                                   yrange=window_yrange), 
                              marks=rfctc(marks))
     pp['coor'] = [x] + [y]
@@ -88,9 +98,9 @@ def Gest(pp, r=None, correction='km', plot=True):
     '''
     r_ppp = pp['ppp']
     if r:
-        r_Gest = spatstat.Gest(r_ppp, r=rfc(r), correction=correction)
+        r_Gest = spatstat_explore.Gest(r_ppp, r=rfc(r), correction=correction)
     else:
-        r_Gest = spatstat.Gest(r_ppp, correction=correction)
+        r_Gest = spatstat_explore.Gest(r_ppp, correction=correction)
     
     r_used = r_Gest['r']
     G_val_theo = r_Gest['theo']
@@ -129,9 +139,9 @@ def Kest(pp, r=None, correction='iso', plot=True):
     '''
     r_ppp = pp['ppp']
     if r:
-        r_Kest = spatstat.Kest(r_ppp, r=rfc(r), correction=correction)
+        r_Kest = spatstat_explore.Kest(r_ppp, r=rfc(r), correction=correction)
     else:
-        r_Kest = spatstat.Kest(r_ppp, correction=correction)
+        r_Kest = spatstat_explore.Kest(r_ppp, correction=correction)
     
     r_used = r_Kest['r']
     K_val_theo = r_Kest['theo']
@@ -172,13 +182,16 @@ def Gcross(pp, i, j, r=None, correction='km', plot=True):
     '''
     r_ppp = pp['ppp']
     if r:
-        r_Gcross = spatstat.Gcross(r_ppp, r=rfc(r), i=i, j=j, correction=correction)
+        r_Gcross = spatstat_explore.Gcross(r_ppp, r=rfc(r), i=i, j=j, correction=correction)
     else:
-        r_Gcross = spatstat.Gcross(r_ppp, i=i, j=j, correction=correction)
+        r_Gcross = spatstat_explore.Gcross(r_ppp, i=i, j=j, correction=correction)
     
-    r_used = r_Gcross['r']
-    G_val_theo = r_Gcross['theo']
-    G_val_samp = r_Gcross['raw' if correction=='none' else correction]
+    # r_used = r_Gcross['r']
+    # G_val_theo = r_Gcross['theo']
+    # G_val_samp = r_Gcross['raw' if correction=='none' else correction]
+    r_used = r_Gcross[0]
+    G_val_theo = r_Gcross[1]
+    G_val_samp = r_Gcross[2]
         
     if plot:
         plt.plot(r_used, G_val_samp, c='black', linestyle='-', linewidth=3,  label=r"$G_{"+correction+"}$")
@@ -215,13 +228,29 @@ def Kcross(pp, i, j, r=None, correction='iso', plot=True):
     '''
     r_ppp = pp['ppp']
     if r:
-        r_Kcross = spatstat.Kcross(r_ppp, r=rfc(r), i=i, j=j, correction=correction)
+        r_Kcross = spatstat_explore.Kcross(r_ppp, r=rfc(r), i=i, j=j, correction=correction)
     else:
-        r_Kcross = spatstat.Kcross(r_ppp, i=i, j=j, correction=correction)
+        r_Kcross = spatstat_explore.Kcross(r_ppp, i=i, j=j, correction=correction)
     
-    r_used = r_Kcross['r']
-    K_val_theo = r_Kcross['theo']
-    K_val_samp = r_Kcross['un' if correction=='none' else correction]
+    # try :
+    #     try:
+    #         print('r_Kcross.r \n', r_Kcross.r)
+    #         print('r_Kcross.theo \n', r_Kcross.theo)
+
+    #     except:
+    #         print('r_Kcross[0] -> r \n', r_Kcross[0])
+    #         print('r_Kcross[1] -> theo \n', r_Kcross[1])
+
+    # except:
+    #     print('r_Kcross \n', r_Kcross)
+
+    # r_used = r_Kcross['r']
+    # K_val_theo = r_Kcross['theo']
+    # K_val_samp = r_Kcross['un' if correction=='none' else correction]
+
+    r_used = r_Kcross[0]
+    K_val_theo = r_Kcross[1]
+    K_val_samp = r_Kcross[2]
         
     if plot:
         plt.plot(r_used, K_val_samp, c='black', linestyle='-', linewidth=3,  label=r"$K_{"+correction+"}$")
@@ -269,9 +298,9 @@ def envelop(pp, fun='Kest', i=None, j=None, r=None, correction=None, global_var=
         correction = rnull
     
     if not r:
-        r_envelop = spatstat.envelope(r_ppp, fun=fun, i=i, j=j, correction=correction,fix_marks=True)
+        r_envelop = spatstat_explore.envelope(r_ppp, fun=fun, i=i, j=j, correction=correction,fix_marks=True)
     else:
-        r_envelop = spatstat.envelope(r_ppp, r=rfc(r), fun=fun, i=i, j=j, correction=correction,fix_marks=True)
+        r_envelop = spatstat_explore.envelope(r_ppp, r=rfc(r), fun=fun, i=i, j=j, correction=correction,fix_marks=True)
     r_used = r_envelop['r']
     enve_val_theo = r_envelop['theo']
     enve_val_samp = r_envelop['obs']
@@ -402,7 +431,7 @@ if __name__=="__main__":
 
     r_ppp = test_ppp['ppp']
     r = [0, 5, 10, 15, 20, 25]
-    r_Gest = spatstat.Gest(r_ppp, r=rfc(r))
+    r_Gest = spatstat_explore.Gest(r_ppp, r=rfc(r))
 
     plt.figure(figsize=(12, 10))
     plt.subplot(2, 2, 1)

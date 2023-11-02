@@ -1,41 +1,98 @@
-import numpy as np
 import os
 import sys;
+
+print(os.environ["CONDA_PREFIX"])
+print("BEFORE EDITING PYTHONPATH\n", sys.path, "\n")
+sys.path.remove('/software.el7/software/SciPy-bundle/2021.05-foss-2021a/lib/python3.9/site-packages')
+sys.path.remove('/software.el7/software/GDAL/3.3.0-foss-2021a/lib/python3.9/site-packages')
+# sys.path.remove('/software.el7/software/pybind11/2.6.2-GCCcore-10.3.0/lib/python3.9/site-packages')
+sys.path.append('/storage/homefs/jg23p152/.conda/envs/hovernet/lib/python3.9/site-packages')
+print("AFTER EDITING PYTHONPATH\n", sys.path, "\n")
+import numpy as np
 import skimage.io as io
 from skimage.measure import label
 import glob
-sys.path.append("..")
+import argparse
+sys.path.append("/storage/homefs/jg23p152/project/MCSpatNet")
 from spatial_analysis_utils_v2_sh import *
-
+import logging
+from tqdm import tqdm
 # Calculates the cross K-function at each cell and propagate the same values to all the pixels in the cell connected components in the ground truth dilated dot map or binary mask.
 
 # Configuration Variables
 
 # Configure data input/output paths
-root_dir = '../../MCSpatNet_datasets/CoNSeP_test'
-image_dir= os.path.join(root_dir, 'images')
-gt_dir= os.path.join(root_dir, 'gt_custom')
-out_dir = os.path.join(root_dir, 'k_func_maps')
 
-# Configure K function
-do_k_correction=True
-n_classes = 3
-r_step = 15 # r stands for radius
-r_range = range(0, 100, r_step)
-r_list = [*r_range]
-r_classes = len(r_range)
-r_classes_all = r_classes * (n_classes)
+
+def get_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root_dir", type=str, default="/storage/homefs/jg23p152/project",)
+    parser.add_argument("--dataset_path", type=str, help="Path to the dataset folder")
+    parser.add_argument("--out_root_dir", type=str, default="k_func_maps",
+                        help="name of the output folder")
+    # parser.add_argument("--dataset", type=str, default="lizard",
+    #                     help="Name of the dataset")
+    parser.add_argument("--nr_types", type=int, default=3,
+                        help="Number of cell types, not counting background as one type")
+    # parser.add_argument("--grouping_dict", type=str, default="1:1,2:2,3:3")
+
+    args = parser.parse_args()
+    # args.grouping_dict = {int(k): [int(i) for i in v.split('-')] for k, v in [i.split(':') for i in args.grouping_dict.split(',')]}
+    return args
+
+def create_logger():
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    # Write logs to the SLURM output file
+    file_handler = logging.StreamHandler(sys.stdout)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    return logger
+
+
+def divide_list(lst, n):
+    division_size = len(lst) // n
+    divisions = [lst[i * division_size:(i + 1) * division_size] for i in range(n - 1)]
+    divisions.append(lst[(n - 1) * division_size:])
+    return divisions
 
 if __name__ == "__main__":
-    if(not os.path.exists(out_dir)):
-        os.mkdir(out_dir)
+
+    args = get_args()
+    logger = create_logger()
+
+    slurm_job = 'slurm job array' if os.environ.get('SLURM_JOB_ID') else 'local machine'
+    slurm_array_task_count = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 1))
+    slurm_array_job_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
+    logger.info(f'Script started. Running in {slurm_job}. Task ID: {slurm_array_job_id+1} out of {slurm_array_task_count}')
+
+    image_dir= os.path.join(args.dataset_path, 'images')
+    gt_dir= os.path.join(args.dataset_path, 'gt_custom')
+    out_dir = os.path.join(args.dataset_path, args.out_root_dir)
+
+    # Configure K function
+    do_k_correction=True
+    n_classes = args.nr_types
+    r_step = 15 # r stands for radius
+    r_range = range(0, 100, r_step)
+    r_list = [*r_range]
+    r_classes = len(r_range)
+    r_classes_all = r_classes * (n_classes)
+
+    os.makedirs(out_dir, exist_ok=True)
 
     img_path_list = glob.glob(os.path.join(image_dir, '*.png'))
+    img_path_list = divide_list(img_path_list, slurm_array_task_count)[slurm_array_job_id]
+    logger.info(f'Processing {len(img_path_list)} images...')
 
+    pbar_format = "Process File: |{bar}| {n_fmt}/{total_fmt}[{elapsed}<{remaining},{rate_fmt}]"
+    pbarx = tqdm(total=len(img_path_list), bar_format=pbar_format, ascii=True, position=0)
     # Calculate the cross K-function at each cell and propagate the same values to all the pixels in the cell connected components in the ground truth dilated dot map or binary mask.
     for img_path in img_path_list:
         # Load the ground truth dot maps and binary masks
-        print('img', img_path )
+        logger.info(f'img {img_path}')
         img_name = os.path.basename(img_path)
         gt_path = os.path.join(gt_dir,img_name.replace('.png','_gt_dots.npy'));
         gt_dots=np.load(gt_path, allow_pickle=True)[:,:,1:].squeeze()
@@ -97,4 +154,6 @@ if __name__ == "__main__":
                 k_indx += r_classes
             gt_kmap[gt_dmap_all_comp == comp_indx] = c_k_func
         gt_kmap.dump(gt_kmap_out_path)
+        pbarx.update()
+    pbarx.close()
 

@@ -1,0 +1,530 @@
+#!/usr/bin/env python3.9
+
+import shutil
+import sys
+import os
+import glob
+import math
+from tqdm import tqdm
+from natsort import natsorted
+
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+
+import cv2
+from skimage import filters
+from skimage.measure import label, moments
+
+from cluster_helper import *
+from utils import get_train_args, create_logger, empty_trash, seed_everything, get_npy_files
+from model_arch_custom import UnetVggMultihead_custom as UnetVggMultihead
+
+feature_code = {'decoder':0, 'cell-detect':1, 'class':2, 'subclass':3, 'k-cell':4}
+
+# def print_model_training_status(model):
+#     for name, param in model.named_parameters():
+#         if param.requires_grad:
+#             print(name, param.data.shape, param.data.requires_grad)
+#     return
+
+def worker_init_fn(worker_id):
+    # ! to make the seed chain reproducible, must use the torch random, not numpy
+    # the torch rng from main thread will regenerate a base seed, which is then
+    # copied into the dataloader each time it created (i.e start of each epoch)
+    # then dataloader with this seed will spawn worker, now we reseed the worker
+    worker_info = torch.utils.data.get_worker_info()
+    # to make it more random, simply switch torch.randint to np.randint
+    worker_seed = torch.randint(0, 2 ** 32, (1,))[0].cpu().item() + worker_id
+    # print('Loader Worker %d Uses RNG Seed: %d' % (worker_id, worker_seed))
+    # retrieve the dataset copied into this worker process
+    # then set the random seed for each augmentation
+    worker_info.dataset.get_worker_id(worker_id, worker_seed)
+    return
+
+
+if __name__=="__main__":
+    args = get_train_args()
+    logger = create_logger()
+    logger.info(f'------Training arguments print-out:\n{args}')
+
+    if args.cropped_data:
+        from my_dataloader_w_kfunc_custom import CellsDataset
+        from my_dataloader_custom import CellsDataset as CellsDataset_simple
+        from cluster_helper_eff import *
+    else:
+        from my_dataloader_w_kfunc import CellsDataset
+        from my_dataloader import CellsDataset as CellsDataset_simple
+        from cluster_helper import *
+
+    # checkpoints_save_path: path to save checkpoints
+    checkpoints_save_path   = os.path.join(args.checkpoints_root_dir, args.checkpoints_folder_name)
+    cluster_tmp_out         = os.path.join(args.root_dir, args.clustering_pseudo_gt_root, args.checkpoints_folder_name)
+    
+    if args.model_param_path is None:
+        if os.path.isdir(checkpoints_save_path):
+            shutil.rmtree(args.checkpoints_root_dir)
+        if os.path.isdir(cluster_tmp_out):
+            shutil.rmtree(cluster_tmp_out)
+    else:
+        chekpoints = natsorted(get_npy_files(checkpoints_save_path, 'pth'))
+        args.model_param_path = chekpoints[-1] if len(chekpoints) > 0 else None
+
+    os.makedirs(args.checkpoints_root_dir, exist_ok=True)
+    os.makedirs(checkpoints_save_path, exist_ok=True)
+    os.makedirs(args.clustering_pseudo_gt_root, exist_ok=True)
+    os.makedirs(cluster_tmp_out, exist_ok=True)
+
+
+    start_epoch             = 0  # To use if continuing training from a previous epoch loaded from model_param_path
+    epoch_start_eval_prec   = 0 # After epoch_start_eval_prec epochs start to evaluate F-score of predictions on the validation set.
+    restart_epochs_freq     = 50 # reset frequency for optimizer
+    next_restart_epoch      = restart_epochs_freq + start_epoch
+    gpu_or_cpu              ='cuda' if torch.cuda.is_available() else 'cpu' # use cuda or cpu
+    device=torch.device(gpu_or_cpu)
+    seed_everything(args.seed) # set seed for reproducibility
+    
+    # Configure training dataset
+    train_image_root = os.path.join(args.train_data_root, 'images')
+    train_dmap_root = os.path.join(args.train_data_root, 'gt_custom') 
+    train_dots_root = os.path.join(args.train_data_root, 'gt_custom') 
+    train_dmap_subclasses_root = cluster_tmp_out
+    train_dots_subclasses_root = train_dmap_subclasses_root
+    train_kmap_root = os.path.join(args.train_data_root, 'k_func_maps') 
+
+    # Configure validation dataset
+    test_image_root = os.path.join(args.test_data_root, 'images')
+    test_dmap_root = os.path.join(args.test_data_root, 'gt_custom')
+    test_dots_root = os.path.join(args.test_data_root, 'gt_custom')
+    test_dmap_subclasses_root = cluster_tmp_out
+    test_dots_subclasses_root = test_dmap_subclasses_root
+    test_kmap_root = os.path.join(args.test_data_root, 'k_func_maps') 
+
+    dropout_prob = 0.2
+    initial_pad = 126 # We add padding so that final output has same size as input since we do not use same padding conv.
+    interpolate = 'False'
+    conv_init = 'he'
+
+    n_channels = 3
+    n_classes = 3 # number of cell classes (others, healthy, malignant)
+    n_classes_out = n_classes + 1 # number of output classes = number of cell classes (lymphocytes, tumor, stromal) + 1 (for cell detection channel)
+    class_indx = '1,2,3' # the index of the classes channels in the ground truth
+    n_clusters = 5 # number of clusters per class
+    n_classes2 = n_clusters * (n_classes) # number of output classes for the cell cluster classification
+
+    prints_per_epoch=1 # print frequency per epoch
+
+    # Initialize the range of the radii for the K function for each class
+    r_step = 15
+    r_range = range(0, 100, r_step)
+    r_arr = np.array([*r_range])
+    r_classes = len(r_range) # number of output channels for the K function for a single class
+    r_classes_all = r_classes * (n_classes ) # number of output channels for the K function over all classes
+
+    k_norm_factor = 100 # the maximum K-value (i.e. number of nearby cells at radius r) to normalize the K-func to [0,1]
+    lamda_dice = 1;  # weight for dice loss for main output channels (cell detection + cell classification)
+    lamda_subclasses = 1 # weight for dice loss for secondary output channels (cell cluster classification)
+    lamda_k = 1 # weight for L1 loss for K function regression
+
+
+    model=nn.DataParallel(UnetVggMultihead(kwargs={'dropout_prob':dropout_prob, 
+                                                   'initial_pad':initial_pad, 
+                                                   'interpolate':interpolate, 
+                                                   'conv_init':conv_init, 
+                                                   'n_classes':n_classes, 
+                                                   'n_channels':n_channels, 
+                                                   'n_heads':4, 
+                                                   'head_classes':[1, n_classes, n_classes2, r_classes_all]}))
+    if args.model_param_path is not None:
+        model.load_state_dict(torch.load(args.model_param_path), strict=False);
+        start_epoch = int(args.model_param_path.split('_')[-2])
+    model.to(device)
+    model.module.control_encoder_and_bottleneck(order='freeze', print_info=True)
+    logger.info(f'------Loaded model from {args.model_param_path}. Encoder and bottleneck layers are frozen.')
+
+    # Initialize sigmoid layer for cell detection
+    criterion_sig = nn.Sigmoid()
+    # Initialize softmax layer for cell classification
+    criterion_softmax = nn.Softmax(dim=1)
+    # Initialize L1 loss for K function regression
+    criterion_l1_sum = nn.L1Loss(reduction='sum')
+
+    # Initialize Optimizer
+    # optimizer=torch.optim.Adam(list(model.final_layers_lst.parameters())+list(model.decoder.parameters())+list(model.bottleneck.parameters())+list(model.encoder.parameters()),lr)
+    # optimizer=torch.optim.Adam(list(model.module.final_layers_lst.parameters())+list(model.module.decoder.parameters())+list(model.module.bottleneck.parameters())+list(model.module.encoder.parameters()),args.lr)
+    optimizer=torch.optim.Adam(model.parameters(),args.lr)
+
+    # Initialize training dataset loader
+    train_dataset=CellsDataset(train_image_root if not args.cropped_data else args.root_dir,train_dmap_root,train_dots_root,class_indx,train_dmap_subclasses_root, train_dots_subclasses_root, train_kmap_root, split_filepath=args.train_split_filepath, phase='train', fixed_size=args.crop_size, max_scale=16)
+    train_loader=DataLoader(train_dataset, batch_size=args.batch_size[0], shuffle=True, num_workers=14, worker_init_fn=worker_init_fn)
+
+    # Validation set does not crop images (fixed_size=-1) --> they are of different sizes --> batch size must be 1
+    test_dataset=CellsDataset(test_image_root if not args.cropped_data else args.root_dir,test_dmap_root,test_dots_root,class_indx,test_dmap_subclasses_root, test_dots_subclasses_root, test_kmap_root, split_filepath=args.test_split_filepath,phase='test', fixed_size=-1, max_scale=16)
+    test_loader=DataLoader(test_dataset,batch_size=int(args.batch_size[0]*1.5), shuffle=False, num_workers=14, worker_init_fn=worker_init_fn)
+
+    # Initialize training dataset loader for clustering phase
+    simple_train_dataset=CellsDataset_simple(train_image_root if not args.cropped_data else args.root_dir,train_dmap_root,train_dots_root,class_indx, split_filepath=args.cluster_data_filepath, phase='test', fixed_size=-1, max_scale=16, return_padding=True)
+    simple_train_loader=DataLoader(simple_train_dataset, batch_size=int(args.batch_size[0]*1.5), shuffle=False, num_workers=14, worker_init_fn=worker_init_fn)
+
+    logger.info(f'------Training set size: {len(train_dataset)} image crops. Dataloader will have {len(train_loader)} batches of size {train_loader.batch_size}.')
+    logger.info(f'------Clustering set size: {len(simple_train_dataset)} image crops. Dataloader will have {len(simple_train_loader)} batches of size {simple_train_loader.batch_size}.')
+    logger.info(f'------Validataion set size: {len(test_dataset)} image crops. Dataloader will have {len(test_loader)} batches of size {test_loader.batch_size}.')
+    logger.info(f'------Number of cell classes: {n_classes}')
+    logger.info(f'------Checkpoint save path: {checkpoints_save_path}')
+    # Use prints_per_epoch to get iteration number to generate sample output
+    # print_frequency = len(train_loader)//prints_per_epoch;
+    print_frequency_test = len(test_loader) // prints_per_epoch;
+
+    best_epoch_filepath=None
+    best_epoch=None
+    best_f1_mean = 0
+    best_prec_recall_diff = math.inf
+
+    centroids = None
+    # scaler = torch.cuda.amp.GradScaler()
+    
+    with tqdm(range(start_epoch,args.epochs), unit='epoch', desc="Training", dynamic_ncols=True) as epoch_iterator:
+        for epoch in epoch_iterator:
+            # If epoch already exists then skip
+            epoch_files = glob.glob(os.path.join(checkpoints_save_path, 'mcspat_epoch_'+str(epoch)+"_*.pth"))
+            if len(epoch_files) > 0:
+                continue;
+            # Cluster features at the beginning of each epoch
+            logger.info(f'EPOCH {epoch}')
+            logger.info('------Commencing clustering for pseudo-label generation...')
+            centroids = perform_clustering(model, simple_train_loader, n_clusters, n_classes, [feature_code['k-cell'], feature_code['subclass']], train_dmap_subclasses_root, centroids, using_crops=args.cropped_data)
+            logger.info('------Clustering for pseudo-label generation complete.')
+                    
+            # Training phase
+            if epoch + 1 == args.start_finetuning and not model.module.is_finetuning:
+                model.module.control_encoder_and_bottleneck(order='finetune')
+                train_loader=DataLoader(train_dataset, batch_size=args.batch_size[1], shuffle=True, num_workers=14, worker_init_fn=worker_init_fn)
+                logger.info('------Commencing finetuning of encoder.')
+                logger.info(f'------Training set size: {len(train_dataset)} image crops. Dataloader will have {len(train_loader)} batches of size {train_loader.batch_size}.')
+            model.train()
+
+            # Initialize variables for accumulating loss over the epoch
+            epoch_loss=0
+            epoch_loss_detect=0
+            epoch_loss_class=0
+            epoch_loss_kfunc=0
+            epoch_loss_subclass=0
+            # train_count = 0
+            # train_loss_k = 0
+            # train_loss_dice = 0
+            train_count_k = 0
+
+            with tqdm(train_loader, unit='batch', desc=f"Train Step [{epoch}]", ascii=' =', dynamic_ncols=True) as batch_loader:
+                for i, (img, gt_dmap, gt_dmap_subclasses, gt_kmap, __) in enumerate(batch_loader):
+                    ''' 
+                        img: input image
+                        gt_dmap: ground truth map for cell classes (lymphocytes, epithelial/tumor, stromal) with dilated dots. This can be a binary mask or a density map ( in which case it will be converted to a binary mask)
+                        gt_dots: ground truth binary dot map for cell classes (lymphocytes, epithelial/tumor, stromal). 
+                        gt_dmap_subclasses: ground truth map for cell clustering sub-classes with dilated dots. This can be a binary mask or a density map ( in which case it will be converted to a binary mask) 
+                        gt_dots_subclasses: ground truth binary dot map for cell clustering sub-classes. 
+                        gt_kmap: ground truth k-function map. At each cell center contains the cross k-functions centered at that cell. 
+                        img_name: img filename
+                    '''
+                    gt_kmap /= k_norm_factor # Normalize K functions ground truth
+                    
+                    # Convert ground truth maps to binary mask (in case they were density maps)
+                    gt_dmap = gt_dmap > 0
+                    gt_dmap_subclasses = gt_dmap_subclasses > 0
+                    # Get the detection ground truth maps from the classes ground truth maps
+                    gt_dmap_all =  gt_dmap.max(dim=1, keepdim=True)[0]
+                    # Set datatype and move to GPU
+                    gt_dmap = gt_dmap.type(torch.FloatTensor)
+                    gt_dmap_all = gt_dmap_all.type(torch.FloatTensor)
+                    gt_dmap_subclasses = gt_dmap_subclasses.type(torch.FloatTensor)
+                    gt_kmap = gt_kmap.type(torch.FloatTensor)
+
+                    # forward propagation
+                    # with torch.autocast(device_type='cuda', dtype=torch.float16):        
+                    loss_dice_all, loss_dice_class, loss_dice_subclass, loss_l1_k = model(x=img,
+                                                                                        gt={'gt_dmap_all':gt_dmap_all,
+                                                                                            'gt_dmap':gt_dmap,
+                                                                                            'gt_dmap_subclasses':gt_dmap_subclasses,
+                                                                                            'gt_kmap':{'tensor':gt_kmap, 'r_classes_all':r_classes_all}},
+                                                                                        loss_fns={'criterion_l1_sum':criterion_l1_sum,
+                                                                                                    'criterion_sig':criterion_sig,
+                                                                                                    'criterion_softmax':criterion_softmax})
+                    
+                        ################### MEAN REDUCTION ###################
+                    loss_dice_all = loss_dice_all.mean()
+                    loss_dice_class = loss_dice_class.mean()
+                    loss_dice_subclass = loss_dice_subclass.mean()
+                    loss_l1_k = loss_l1_k.sum() / (gt_dmap_all.clone().sum()*r_classes_all) # fake mean reduction over pixels that should be non-zero (focus region)
+                    ###########################################################################
+                    # logger.debug(loss_dice_all, loss_dice_class, loss_dice_subclass, loss_l1_k)
+                    loss_dice = loss_dice_class + loss_dice_all + lamda_subclasses * loss_dice_subclass
+
+                    # Add up the dice loss and the K function L1 loss. The K function can be NAN especially in the beginning of training. Do not add to loss if it is NAN.
+                    loss = (lamda_dice * loss_dice )
+                    if(not math.isnan(loss_l1_k.item())):
+                        loss += loss_l1_k * lamda_k
+                        train_count_k += 1
+                        epoch_loss_kfunc += loss_l1_k.item()
+
+                    # Backpropagate loss
+                    
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    # scaler.scale(loss).backward()
+                    # scaler.step(optimizer)
+                    # scaler.update()
+
+                    epoch_loss += loss.item()
+                    epoch_loss_detect += loss_dice_all.item()
+                    epoch_loss_class += loss_dice_class.item()
+                    epoch_loss_subclass += loss_dice_subclass.item()
+
+                    # CHANGE THIS FOR TQDM UPDATES
+                    batch_loader.set_postfix({"DiceLoss": loss_dice_all.item(), "K-FuncLoss":loss_l1_k.item()})
+            empty_trash()
+            epoch_loss = epoch_loss/len(train_loader)
+            epoch_loss_detect = epoch_loss_detect/len(train_loader)
+            epoch_loss_class = epoch_loss_class/len(train_loader)
+            epoch_loss_subclass = epoch_loss_subclass/len(train_loader)
+            epoch_loss_kfunc = epoch_loss_kfunc/train_count_k
+            logger.info(f'------Loss print-out (epoch mean):')
+            logger.info(f'------------train-loss-detect: {epoch_loss_detect:.4f}')
+            logger.info(f'------------train-loss-class: {epoch_loss_class:.4f}')
+            logger.info(f'------------train-loss-subclass: {epoch_loss_subclass:.4f}')
+            logger.info(f'------------train-loss-kfunc: {epoch_loss_kfunc:.4f}')
+            logger.info(f'------------train-loss: {epoch_loss:.4f}')
+        
+            #break
+
+            # Testing phase on Validation Set
+            model.eval()
+            err=np.array([0 for s in range(n_classes_out)])
+            loss_val = 0
+            loss_val_detect = 0
+            loss_val_class = 0
+            loss_val_kfunc = 0
+            tp_count_all = np.zeros((n_classes_out))
+            fp_count_all = np.zeros((n_classes_out))
+            fn_count_all = np.zeros((n_classes_out))
+            test_count_k = 0
+            with torch.no_grad():
+                with tqdm(test_loader, unit='batch', desc=f"Valid Step [{epoch}]", ascii=' =', dynamic_ncols=True) as batch_loader:
+                    for i, (img, gt_dmap, gt_dots, gt_kmap, __) in enumerate(batch_loader):
+                        ''' 
+                            img: input image
+                            gt_dmap: ground truth map for cell classes (lymphocytes, epithelial/tumor, stromal) with dilated dots. This can be a binary mask or a density map ( in which case it will be converted to a binary mask)
+                            gt_dots: ground truth binary dot map for cell classes (lymphocytes, epithelial/tumor, stromal). 
+                            gt_kmap: ground truth k-function map. At each cell center contains the cross k-functions centered at that cell. 
+                            img_name: img filename
+                        '''
+                        gt_kmap /= k_norm_factor # Normalize K functions ground truth
+                        # Convert ground truth maps to binary masks (in case they were density maps)
+                        gt_dmap = gt_dmap > 0
+                        # Get the detection ground truth maps from the classes ground truth maps
+                        gt_dmap_all =  gt_dmap.max(dim=1, keepdim=True)[0]
+                        gt_dots_all =  gt_dots.max(dim=1, keepdim=True)[0]
+                        # Set datatype and move to GPU
+                        gt_dmap = gt_dmap.type(torch.FloatTensor)
+                        gt_dmap_all = gt_dmap_all.type(torch.FloatTensor)
+                        gt_kmap = gt_kmap.type(torch.FloatTensor)
+
+                        # forward Propagation
+                        # with torch.autocast(device_type='cuda', dtype=torch.float16):  
+                        loss_dice_all, loss_dice_class, loss_l1_k, et_all_sig, et_class_sig = model(x=img,
+                                                                                                    gt={'gt_dmap_all':gt_dmap_all,
+                                                                                                        'gt_dmap':gt_dmap,
+                                                                                                        'gt_dmap_subclasses':None,
+                                                                                                        'gt_kmap':{'tensor':gt_kmap, 'r_classes_all':r_classes_all}},
+                                                                                                    loss_fns={'criterion_l1_sum':criterion_l1_sum,
+                                                                                                                'criterion_sig':criterion_sig,
+                                                                                                                'criterion_softmax':criterion_softmax},
+                                                                                                    phase='test')
+
+                        loss_dice_all = loss_dice_all.mean()
+                        loss_dice_class = loss_dice_class.mean()
+                        loss_l1_k = (loss_l1_k.sum() / (gt_dmap_all.clone().sum()*r_classes_all)).item()
+
+                        loss_dice = (loss_dice_class + loss_dice_all).item()
+
+                        loss = (lamda_dice * loss_dice )
+                        if(not math.isnan(loss_l1_k)):
+                            loss += loss_l1_k * lamda_k
+                            loss_val_kfunc += loss_l1_k
+                            test_count_k += 1
+
+                        loss_val += loss
+                        loss_val_detect += loss_dice_all.item()
+                        loss_val_class += loss_dice_class.item()
+                        
+                        # Convert ground truth maps and preds to numpy arrays
+                        gt_dots = gt_dots.numpy()
+                        gt_dots_all = gt_dots_all.numpy()
+                        gt_dmap = gt_dmap.numpy()
+                        et_all_sig = et_all_sig.cpu().numpy()
+                        et_class_sig = et_class_sig.cpu().numpy()
+                        
+                        
+                        # Calculate F-score if epoch >= epoch_start_eval_prec
+                        if(epoch >= epoch_start_eval_prec):
+                            # Apply a 0.5 threshold on detection output and convert to binary mask
+                            e_hard = filters.apply_hysteresis_threshold(et_all_sig.squeeze(), 0.5, 0.5)            
+                            e_hard2 = (e_hard > 0).astype(np.uint8)
+                            e_hard2_all = e_hard2.copy() 
+                            for k in range(len(img)):
+                            # Get predicted cell centers by finding center of contours in binary mask
+                                e_dot = np.zeros((img.shape[-2], img.shape[-1]))
+                                contours, hierarchy = cv2.findContours(e_hard2[k], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                                for idx in range(len(contours)):
+                                    contour_i = contours[idx]
+                                    M = cv2.moments(contour_i)
+                                    if(M['m00'] == 0):
+                                        continue;
+                                    cx = round(M['m10'] / M['m00'])
+                                    cy = round(M['m01'] / M['m00'])
+                                    e_dot[cy, cx] = 1
+                                e_dot_all = e_dot.copy()
+
+                                tp_count = 0 # initialize number of true positives
+                                fp_count = 0 # initialize number of false positives
+                                fn_count = 0 # initialize number of false negatives
+                                # Init g_dot_vis to contain all cell detections ground truth dots
+                                g_dot_vis = gt_dots_all[k].copy().squeeze()
+                                # Get connected components in the predicted detection binary map
+                                e_hard2_comp = label(e_hard2[k])
+                                e_hard2_comp_all = e_hard2_comp.copy()
+                                # For each connected component, if it interests with a grount truth dot then it is a TP, otherwise it is a FP.
+                                # If it is a TP, remove it from g_dot_vis.
+                                # Note: if more than one ground truth dot interests, then only one is a TP.
+                                for l in range(1, e_hard2_comp.max()+1):
+                                    e_hard2_comp_l = (e_hard2_comp == l)
+                                    M = moments(e_hard2_comp_l)
+                                    (y,x) = int(M[1, 0] / M[0, 0]), int(M[0, 1] / M[0, 0])
+                                    if ((e_hard2_comp_l * g_dot_vis).sum()>0): # true pos
+                                        tp_count += 1
+                                        (yg,xg) = np.where((e_hard2_comp_l * g_dot_vis) > 0)
+                                        yg = yg[0]
+                                        xg = xg[0]
+                                        g_dot_vis[yg,xg] = 0 
+                                    else: #((e_hard2_comp_l * g_dot_vis).sum()==0): # false pos
+                                        fp_count += 1
+                                # Remaining cells in g_dot_vis are False Negatives.
+                                fn_points = np.where(g_dot_vis > 0)
+                                fn_count = len(fn_points[0])
+
+                                # Update TP, FP, FN counts for detection with counts from current image predictions
+                                tp_count_all[-1] = tp_count_all[-1] + tp_count
+                                fp_count_all[-1] = fp_count_all[-1] + fp_count
+                                fn_count_all[-1] = fn_count_all[-1] + fn_count
+
+                                # Get predicted cell classes
+                                et_class_argmax = et_class_sig[k].squeeze().argmax(axis=0)
+                                e_hard2_all = e_hard2[k].copy()
+                                # For each class get the TP, FP, FN counts similar to previous detection code.
+                                for s in range(n_classes):
+                                    g_count = gt_dots[k,s,:,:].sum()
+                                    e_hard2_s = (et_class_argmax == s)  
+                                    e_dot = e_hard2_s * e_dot_all  
+                                    g_dot = gt_dots[k,s,:,:].squeeze()
+
+                                    tp_count = 0
+                                    fp_count = 0
+                                    fn_count = 0
+                                    g_dot_vis = g_dot.copy()
+                                    e_dots_tuple = np.where(e_dot > 0)
+                                    for idx in range(len(e_dots_tuple[0])):
+                                        cy=e_dots_tuple[0][idx]
+                                        cx=e_dots_tuple[1][idx]
+                                        l = e_hard2_comp_all[cy, cx]
+                                        e_hard2_comp_l = (e_hard2_comp == l)
+                                        if ((e_hard2_comp_l * g_dot_vis).sum()>0): # true pos
+                                            tp_count += 1
+                                            (yg,xg) = np.where((e_hard2_comp_l * g_dot_vis) > 0)
+                                            yg = yg[0]
+                                            xg = xg[0]
+                                            g_dot_vis[yg,xg] = 0 
+                                        else: #((e_hard2_comp_l * g_dot_vis).sum()==0): # false pos
+                                            fp_count += 1
+                                    fn_points = np.where(g_dot_vis > 0)
+                                    fn_count = len(fn_points[0])
+
+
+                                    tp_count_all[s] = tp_count_all[s] + tp_count
+                                    fp_count_all[s] = fp_count_all[s] + fp_count
+                                    fn_count_all[s] = fn_count_all[s] + fn_count
+
+                        batch_loader.set_postfix({"DiceLoss": loss_dice, "K-FuncLoss":loss_l1_k})
+
+            empty_trash()
+            logger.info('------------validation-loss-detect: {:.4f}'.format(loss_val_detect/len(test_loader)))
+            logger.info('------------validation-loss-class: {:.4f}'.format(loss_val_class/len(test_loader)))
+            logger.info('------------validation-loss-kfunc: {:.4f}'.format(loss_val_kfunc/test_count_k))
+            logger.info(f'------------validation-loss: {loss_val/len(test_loader):.4f}')
+            saved = False
+
+            args.cell_code[len(args.cell_code)+1] = 'detection'
+            precision_all = np.zeros((n_classes_out))
+            recall_all = np.zeros((n_classes_out))
+            f1_all = np.zeros((n_classes_out))
+            if(epoch >= epoch_start_eval_prec):
+                count_all = tp_count_all.sum() + fn_count_all.sum()
+                for s in range(n_classes_out):
+                    if(tp_count_all[s] + fp_count_all[s] == 0):
+                        precision_all[s] = 1
+                    else:
+                        precision_all[s] = tp_count_all[s]/(tp_count_all[s] + fp_count_all[s])
+                    if(tp_count_all[s] + fn_count_all[s] == 0):
+                        recall_all[s] = 1
+                    else:
+                        recall_all[s] = tp_count_all[s]/(tp_count_all[s] + fn_count_all[s])
+                    if(precision_all[s]+recall_all[s] == 0):
+                        f1_all[s] = 0
+                    else:
+                        f1_all[s] = 2*(precision_all[s] *recall_all[s])/(precision_all[s]+recall_all[s])
+                    if s == 0:
+                        logger.info(f'------Validation metrics print-out (per class):')
+                    logger.info(f'------------class {args.cell_code[s+1]}: precision_all {precision_all[s]:.4f}, recall_all {recall_all[s]:.4f}, f1_all {f1_all[s]:.4f}')
+
+                logger.info(f'------------detection: precision_all {precision_all[-1]:.4f}, recall_all {recall_all[-1]:.4f}, f1_all {f1_all[-1]:.4f}')
+                logger.info(f'------------mean classes: precision_all {precision_all[:-1].mean():.4f}, recall_all {recall_all[:-1].mean():.4f}, f1_all {f1_all[:-1].mean():.4f}')
+
+
+            # Check if this is the best epoch so far based on fscore on validation set
+            model_save_postfix = ''
+            is_best_epoch = False
+            # if (f1_all.mean() > best_f1_mean):
+            if (f1_all.mean() - best_f1_mean >= 0.005):
+                model_save_postfix += '_f1'
+                best_f1_mean = f1_all.mean()
+                best_prec_recall_diff = abs(recall_all.mean()-precision_all.mean())
+                is_best_epoch = True
+            elif ((abs(f1_all.mean() - best_f1_mean) < 0.005) # a slightly lower f score but smaller gap between precision and recall
+                    and abs(recall_all.mean()-precision_all.mean()) < best_prec_recall_diff):
+                model_save_postfix += '_pr-diff'
+                best_f1_mean = f1_all.mean()
+                best_prec_recall_diff = abs(recall_all.mean()-precision_all.mean())
+                is_best_epoch = True
+
+            # Save checkpoint if it is best so far
+            if((saved == False) and (model_save_postfix != '')):
+                # print('epoch', epoch, 'saving')
+                logger.info('------Saving checkpoint and predictions...')
+                new_epoch_filepath = os.path.join(checkpoints_save_path, 'mcspat_epoch_'+str(epoch)+model_save_postfix+".pth")
+                torch.save(model.state_dict(), new_epoch_filepath ) # save only if get better error
+                centroids.dump(os.path.join(checkpoints_save_path, 'epoch{}_centroids.npy'.format(epoch)))
+                saved = True
+                logger.info('------Checkpoint and predictions saved.')
+
+                if(is_best_epoch):
+                    best_epoch_filepath = new_epoch_filepath
+                    best_epoch = epoch
+                    
+            # Adam optimizer needs resetting to avoid parameters learning rates dying
+            sys.stdout.flush();
+            if((epoch >= next_restart_epoch) and not(best_epoch_filepath is None)):
+                next_restart_epoch = epoch + restart_epochs_freq
+                model.load_state_dict(torch.load(best_epoch_filepath), strict=False);
+                model.to(device)
+                optimizer=torch.optim.Adam(list(model.final_layers_lst.parameters())+list(model.decoder.parameters())+list(model.bottleneck.parameters())+list(model.encoder.parameters()),args.lr) 
+
+    logger.info('------Training complete.')

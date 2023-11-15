@@ -21,13 +21,11 @@ from cluster_helper import *
 from utils import get_train_args, create_logger, empty_trash, seed_everything, get_npy_files
 from model_arch_custom import UnetVggMultihead_custom as UnetVggMultihead
 
-feature_code = {'decoder':0, 'cell-detect':1, 'class':2, 'subclass':3, 'k-cell':4}
+from my_dataloader_w_kfunc_custom import CellsDataset
+from my_dataloader_custom import CellsDataset as CellsDataset_simple
+from cluster_helper_eff import *
 
-# def print_model_training_status(model):
-#     for name, param in model.named_parameters():
-#         if param.requires_grad:
-#             print(name, param.data.shape, param.data.requires_grad)
-#     return
+feature_code = {'decoder':0, 'cell-detect':1, 'class':2, 'subclass':3, 'k-cell':4}
 
 def worker_init_fn(worker_id):
     # ! to make the seed chain reproducible, must use the torch random, not numpy
@@ -49,15 +47,6 @@ if __name__=="__main__":
     logger = create_logger()
     logger.info(f'------Training arguments print-out:\n{args}')
 
-    if args.cropped_data:
-        from my_dataloader_w_kfunc_custom import CellsDataset
-        from my_dataloader_custom import CellsDataset as CellsDataset_simple
-        from cluster_helper_eff import *
-    else:
-        from my_dataloader_w_kfunc import CellsDataset
-        from my_dataloader import CellsDataset as CellsDataset_simple
-        from cluster_helper import *
-
     # checkpoints_save_path: path to save checkpoints
     checkpoints_save_path   = os.path.join(args.checkpoints_root_dir, args.checkpoints_folder_name)
     cluster_tmp_out         = os.path.join(args.root_dir, args.clustering_pseudo_gt_root, args.checkpoints_folder_name)
@@ -76,12 +65,13 @@ if __name__=="__main__":
     os.makedirs(args.clustering_pseudo_gt_root, exist_ok=True)
     os.makedirs(cluster_tmp_out, exist_ok=True)
 
-
+    
     start_epoch             = 0  # To use if continuing training from a previous epoch loaded from model_param_path
     epoch_start_eval_prec   = 0 # After epoch_start_eval_prec epochs start to evaluate F-score of predictions on the validation set.
     restart_epochs_freq     = 50 # reset frequency for optimizer
     next_restart_epoch      = restart_epochs_freq + start_epoch
     gpu_or_cpu              ='cuda' if torch.cuda.is_available() else 'cpu' # use cuda or cpu
+    nr_gpu = torch.cuda.device_count() if gpu_or_cpu == 'cuda' else 1
     device=torch.device(gpu_or_cpu)
     seed_everything(args.seed) # set seed for reproducibility
     
@@ -156,15 +146,15 @@ if __name__=="__main__":
     optimizer=torch.optim.Adam(model.parameters(),args.lr)
 
     # Initialize training dataset loader
-    train_dataset=CellsDataset(train_image_root if not args.cropped_data else args.root_dir,train_dmap_root,train_dots_root,class_indx,train_dmap_subclasses_root, train_dots_subclasses_root, train_kmap_root, split_filepath=args.train_split_filepath, phase='train', fixed_size=args.crop_size, max_scale=16)
+    train_dataset=CellsDataset(args.root_dir,class_indx, train_dmap_subclasses_root, split_filepath=args.train_split_filepath, phase='train', fixed_size=args.crop_size, max_scale=16)
     train_loader=DataLoader(train_dataset, batch_size=args.batch_size[0], shuffle=True, num_workers=14, worker_init_fn=worker_init_fn)
 
     # Validation set does not crop images (fixed_size=-1) --> they are of different sizes --> batch size must be 1
-    test_dataset=CellsDataset(test_image_root if not args.cropped_data else args.root_dir,test_dmap_root,test_dots_root,class_indx,test_dmap_subclasses_root, test_dots_subclasses_root, test_kmap_root, split_filepath=args.test_split_filepath,phase='test', fixed_size=-1, max_scale=16)
-    test_loader=DataLoader(test_dataset,batch_size=int(args.batch_size[0]*1.5), shuffle=False, num_workers=14, worker_init_fn=worker_init_fn)
+    test_dataset=CellsDataset(args.root_dir, class_indx, test_dmap_subclasses_root, split_filepath=args.test_split_filepath,phase='test', fixed_size=-1, max_scale=16)
+    test_loader=DataLoader(test_dataset, batch_size=int(args.batch_size[0]*1.5), shuffle=False, num_workers=14, worker_init_fn=worker_init_fn)
 
     # Initialize training dataset loader for clustering phase
-    simple_train_dataset=CellsDataset_simple(train_image_root if not args.cropped_data else args.root_dir,train_dmap_root,train_dots_root,class_indx, split_filepath=args.cluster_data_filepath, phase='test', fixed_size=-1, max_scale=16, return_padding=True)
+    simple_train_dataset=CellsDataset_simple(args.root_dir, class_indx, split_filepath=args.cluster_data_filepath, phase='test', fixed_size=-1, max_scale=16, return_padding=True)
     simple_train_loader=DataLoader(simple_train_dataset, batch_size=int(args.batch_size[0]*1.5), shuffle=False, num_workers=14, worker_init_fn=worker_init_fn)
 
     logger.info(f'------Training set size: {len(train_dataset)} image crops. Dataloader will have {len(train_loader)} batches of size {train_loader.batch_size}.')
@@ -172,6 +162,8 @@ if __name__=="__main__":
     logger.info(f'------Validataion set size: {len(test_dataset)} image crops. Dataloader will have {len(test_loader)} batches of size {test_loader.batch_size}.')
     logger.info(f'------Number of cell classes: {n_classes}')
     logger.info(f'------Checkpoint save path: {checkpoints_save_path}')
+    logger.info(f'------Cluster pseudo-labels save path: {cluster_tmp_out}')
+    logger.info(f'------Number of GPUs: {nr_gpu}')
     # Use prints_per_epoch to get iteration number to generate sample output
     # print_frequency = len(train_loader)//prints_per_epoch;
     print_frequency_test = len(test_loader) // prints_per_epoch;
@@ -210,13 +202,10 @@ if __name__=="__main__":
             epoch_loss_class=0
             epoch_loss_kfunc=0
             epoch_loss_subclass=0
-            # train_count = 0
-            # train_loss_k = 0
-            # train_loss_dice = 0
             train_count_k = 0
 
             with tqdm(train_loader, unit='batch', desc=f"Train Step [{epoch}]", ascii=' =', dynamic_ncols=True) as batch_loader:
-                for i, (img, gt_dmap, gt_dmap_subclasses, gt_kmap, __) in enumerate(batch_loader):
+                for (img, gt_dmap, gt_dmap_subclasses, gt_kmap, __) in batch_loader:
                     ''' 
                         img: input image
                         gt_dmap: ground truth map for cell classes (lymphocytes, epithelial/tumor, stromal) with dilated dots. This can be a binary mask or a density map ( in which case it will be converted to a binary mask)
@@ -250,13 +239,13 @@ if __name__=="__main__":
                                                                                                     'criterion_sig':criterion_sig,
                                                                                                     'criterion_softmax':criterion_softmax})
                     
-                        ################### MEAN REDUCTION ###################
+                    ################### MEAN REDUCTION ###################
                     loss_dice_all = loss_dice_all.mean()
                     loss_dice_class = loss_dice_class.mean()
                     loss_dice_subclass = loss_dice_subclass.mean()
                     loss_l1_k = loss_l1_k.sum() / (gt_dmap_all.clone().sum()*r_classes_all) # fake mean reduction over pixels that should be non-zero (focus region)
                     ###########################################################################
-                    # logger.debug(loss_dice_all, loss_dice_class, loss_dice_subclass, loss_l1_k)
+
                     loss_dice = loss_dice_class + loss_dice_all + lamda_subclasses * loss_dice_subclass
 
                     # Add up the dice loss and the K function L1 loss. The K function can be NAN especially in the beginning of training. Do not add to loss if it is NAN.
@@ -310,7 +299,7 @@ if __name__=="__main__":
             test_count_k = 0
             with torch.no_grad():
                 with tqdm(test_loader, unit='batch', desc=f"Valid Step [{epoch}]", ascii=' =', dynamic_ncols=True) as batch_loader:
-                    for i, (img, gt_dmap, gt_dots, gt_kmap, __) in enumerate(batch_loader):
+                    for (img, gt_dmap, gt_dots, gt_kmap, __) in batch_loader:
                         ''' 
                             img: input image
                             gt_dmap: ground truth map for cell classes (lymphocytes, epithelial/tumor, stromal) with dilated dots. This can be a binary mask or a density map ( in which case it will be converted to a binary mask)

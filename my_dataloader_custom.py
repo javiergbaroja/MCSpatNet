@@ -9,12 +9,10 @@ from utils import parse_json_file, create_logger, get_npy_files
 logger = create_logger('CellsDataset')
 
 class CellsDataset(Dataset):
-    def __init__(self,img_root, gt_dmap_root, gt_dots_root, class_indx, split_filepath=None, phase='train', fixed_size=-1, max_side=-1, max_scale=-1, return_padding=False):
+    def __init__(self, img_root, class_indx, split_filepath=None, phase='train', fixed_size=-1, max_side=-1, max_scale=-1, return_padding=False):
         super(CellsDataset, self).__init__()
         '''
         img_root: the root path of img.
-        gt_dmap_root: the root path of ground-truth dilated dot maps.
-        gt_dots_root: the root path of ground-truth dot maps.
         class_indx: a comma separated list of channel indices to return from the ground truth
         split_filepath: if not None, then use only the images in the file
         phase: train or test

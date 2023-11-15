@@ -11,13 +11,10 @@ logger = create_logger('CellsDataset-KFunc')
 
 
 class CellsDataset(Dataset):
-    def __init__(self,img_root:str, 
-                 gt_dmap_root:str, 
-                 gt_dots_root:str, 
+    def __init__(self,
+                 img_root:str, 
                  class_indx:str, 
                  gt_dmap_subclasses_root:str, 
-                 gt_dots_subclasses_root:str, 
-                 gt_kmap_root:str, 
                  split_filepath:str=None, 
                  phase:str='train', 
                  fixed_size:int=-1, 
@@ -28,8 +25,6 @@ class CellsDataset(Dataset):
 
         Args:
             img_root (str): path to the image folder
-            gt_dmap_root (str): path to the folder containing the ground truth dilated dot maps
-            gt_dots_root (str): path of ground-truth dot maps
             class_indx (str): a comma separated list of channel indices to return from the ground truth
             gt_dmap_subclasses_root (str): path to the folder containing the pseudo-ground truth dilated dot maps used for the deep clustering module.
             gt_dots_subclasses_root (str): path to the folder containing the pseudo-ground truth dot maps used for the deep clustering module.
@@ -44,7 +39,6 @@ class CellsDataset(Dataset):
         super(CellsDataset, self).__init__()
         
         self.gt_dmap_subclasses_root=gt_dmap_subclasses_root
-        self.gt_dots_subclasses_root=gt_dots_subclasses_root
         self.phase=phase
 
         self.img_names = []

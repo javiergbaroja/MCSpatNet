@@ -3,6 +3,7 @@ import os
 import numpy as np
 import torch
 import torchvision.transforms as T
+from torchvision.transforms.functional import crop
 import random
 
 from utils import parse_json_file, create_logger, get_npy_files
@@ -60,14 +61,14 @@ class CellsDataset(Dataset):
             w = img.shape[2]
             h2 = h
             w2 = w
-            crop = False
+            do_crop = False
             if(h > self.max_side):
                 h2 = self.max_side
-                crop = True
+                do_crop = True
             if(w > self.max_side):
                 w2 = self.max_side
-                crop = True
-            if(crop):
+                do_crop = True
+            if do_crop:
                 y=0
                 x=0
                 if(not (h2 ==h)):
@@ -79,13 +80,13 @@ class CellsDataset(Dataset):
                 gt_dots = gt_dots[y:y+h2, x:x+w2]
 
         if self.fixed_size < 0:
-            crop = T.RandomCrop((img.shape[1]//4, img.shape[2]//4)) 
+            i, j, h, w = T.RandomCrop.get_params(img, output_size=(img.shape[1]//4, img.shape[2]//4)) 
         else:
-            crop = T.RandomCrop((min(self.fixed_size,img.shape[1]), min(self.fixed_size,img.shape[2]))) 
+            i, j, h, w = T.RandomCrop.get_params(img, output_size=(min(self.fixed_size,img.shape[1]), min(self.fixed_size,img.shape[2])))  
         
-        img = crop(img)
-        gt_dmap = crop(gt_dmap)
-        gt_dots = crop(gt_dots)
+        img = crop(img, i, j, h, w)
+        gt_dmap = crop(gt_dmap, i, j, h, w)
+        gt_dots = crop(gt_dots, i, j, h, w)
 
         return img, gt_dmap, gt_dots
 

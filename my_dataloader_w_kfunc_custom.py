@@ -3,7 +3,10 @@ import os
 import numpy as np
 import torch
 import torchvision.transforms as T
+from torchvision.transforms.functional import crop
 import random
+import sys
+sys.path.append('/storage/homefs/jg23p152/project/MCSpatNet')
 
 from utils import parse_json_file, create_logger, get_npy_files
 logger = create_logger('CellsDataset-KFunc')
@@ -66,15 +69,15 @@ class CellsDataset(Dataset):
     def __len__(self):
         return self.n_samples
     
-    def _augment(self, img:np.ndarray, gt_dmap:np.ndarray, gt_subclasses_dmap:np.ndarray, gt_kmap:np.ndarray):
+    def _augment(self, img:torch.Tensor, gt_dmap:torch.Tensor, gt_subclasses_dmap:torch.Tensor, gt_kmap:torch.Tensor):
         if random.random() > 0.5:
-            vertical = T.RandomVerticalFlip(1)
+            vertical = T.RandomVerticalFlip(p=1)
             img = vertical(img)
             gt_dmap = vertical(gt_dmap)
             gt_subclasses_dmap = vertical(gt_subclasses_dmap)
             gt_kmap = vertical(gt_kmap)
         if random.random() > 0.5:
-            horizontal = T.RandomHorizontalFlip(1)
+            horizontal = T.RandomHorizontalFlip(p=1)
             img = horizontal(img)
             gt_dmap = horizontal(gt_dmap)
             gt_subclasses_dmap = horizontal(gt_subclasses_dmap)
@@ -85,34 +88,35 @@ class CellsDataset(Dataset):
             w = img.shape[2]
             h2 = h
             w2 = w
-            crop = False
+            do_crop = False
             if(h > self.max_side):
                 h2 = self.max_side
-                crop = True
+                do_crop = True
             if(w > self.max_side):
                 w2 = self.max_side
-                crop = True
-            if(crop):
+                do_crop = True
+            if(do_crop):
                 y=0
                 x=0
                 if(not (h2 ==h)):
                     y = np.random.randint(0, high = h-h2)
                 if(not (w2 ==w)):
                     x = np.random.randint(0, high = w-w2)
-                img = img[y:y+h2, x:x+w2, :]
-                gt_dmap = gt_dmap[y:y+h2, x:x+w2]
-                gt_subclasses_dmap = gt_subclasses_dmap[y:y+h2, x:x+w2]
-                gt_kmap = gt_kmap[y:y+h2, x:x+w2]
+                img = img[...,y:y+h2, x:x+w2]
+                gt_dmap = gt_dmap[...,y:y+h2, x:x+w2]
+                gt_subclasses_dmap = gt_subclasses_dmap[...,y:y+h2, x:x+w2]
+                gt_kmap = gt_kmap[...,y:y+h2, x:x+w2]
 
         if self.fixed_size < 0:
-            crop = T.RandomCrop((img.shape[1]//4, img.shape[2]//4)) 
+            i, j, h, w = T.RandomCrop.get_params(img, output_size=(img.shape[1]//4, img.shape[2]//4)) 
         else:
-            crop = T.RandomCrop((min(self.fixed_size,img.shape[1]), min(self.fixed_size,img.shape[2]))) 
+            i, j, h, w = T.RandomCrop.get_params(img, output_size=(min(self.fixed_size,img.shape[1]), min(self.fixed_size,img.shape[2]))) 
         
-        img = crop(img)
-        gt_dmap = crop(gt_dmap)
-        gt_subclasses_dmap = crop(gt_subclasses_dmap)
-        gt_kmap = crop(gt_kmap)
+        img = crop(img, i, j, h, w)
+        gt_dmap = crop(gt_dmap, i, j, h, w)
+        gt_subclasses_dmap = crop(gt_subclasses_dmap, i, j, h, w)
+        gt_kmap = crop(gt_kmap, i, j, h, w)
+        
         return img, gt_dmap, gt_subclasses_dmap, gt_kmap
 
 
@@ -174,7 +178,7 @@ class CellsDataset(Dataset):
         # Covert image and ground truth to pytorch format
         img=img.permute((2,0,1)) # convert to order (channel,rows,cols)
         gt_kmap=gt_kmap.permute((2,0,1)) # convert to order (channel,rows,cols)
-        if(len(self.class_indx_list) > 1):
+        if len(self.class_indx_list) > 1:
             gt_dmap=gt_dmap.permute((2,0,1)) # convert to order (channel,rows,cols)
             gt_dots=gt_dots.permute((2,0,1)) if self.phase == 'test' else None# convert to order (channel,rows,cols)
             gt_subclasses_dmap=gt_subclasses_dmap.permute((2,0,1)) if self.phase == 'train' else None # convert to order (channel,rows,cols)
@@ -196,5 +200,5 @@ class CellsDataset(Dataset):
         if self.phase == 'train':
             return img,gt_dmap, gt_subclasses_dmap, gt_kmap, [img_name]
         else:
-            return img,gt_dmap,gt_dots, gt_kmap, [img_name]
+            return img, gt_dmap, gt_dots, gt_kmap, [img_name]
 

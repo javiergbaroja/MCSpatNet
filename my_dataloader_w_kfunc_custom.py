@@ -13,7 +13,7 @@ logger = create_logger('CellsDataset-KFunc')
 
 
 
-class CellsDataset(Dataset):
+class CellsDataset_base(Dataset):
     def __init__(self,
                  img_root:str, 
                  class_indx:str, 
@@ -30,7 +30,6 @@ class CellsDataset(Dataset):
             img_root (str): path to the image folder
             class_indx (str): a comma separated list of channel indices to return from the ground truth
             gt_dmap_subclasses_root (str): path to the folder containing the pseudo-ground truth dilated dot maps used for the deep clustering module.
-            gt_dots_subclasses_root (str): path to the folder containing the pseudo-ground truth dot maps used for the deep clustering module.
             gt_kmap_root (str): path to the folder containing the ground truth cross k-function maps.
             split_filepath (str, optional): path to JSON file containing the information about the validation partition. If none, all the samples will be used. Defaults to None.
             phase (str, optional): 'train' or 'test'. Defaults to 'train'.
@@ -39,7 +38,7 @@ class CellsDataset(Dataset):
             max_scale (int, optional): apply padding to make the patch side divisible by max_scale. Defaults to -1.
         """
 
-        super(CellsDataset, self).__init__()
+        super(CellsDataset_base, self).__init__()
         
         self.gt_dmap_subclasses_root=gt_dmap_subclasses_root
         self.phase=phase
@@ -121,7 +120,7 @@ class CellsDataset(Dataset):
 
 
         
-    def _apply_padding(self, img, gt_dmap, gt_dots, gt_subclasses_dmap, gt_kmap):
+    def _apply_padding(self, img, gt_dmap, gt_dots_or_gt_subclasses_dmap, gt_kmap):
         ds_rows=int(img.shape[1]//self.max_scale)*self.max_scale
         ds_cols=int(img.shape[2]//self.max_scale)*self.max_scale
         pad_y1 = 0
@@ -140,65 +139,142 @@ class CellsDataset(Dataset):
 
         img = pad_one(img)
         gt_dmap = pad_zero(gt_dmap)
-        gt_dots = pad_zero(gt_dots) if self.phase == 'test' else None
-        gt_subclasses_dmap = pad_zero(gt_subclasses_dmap) if self.phase == 'train' else None
+        gt_dots_or_gt_subclasses_dmap = pad_zero(gt_dots_or_gt_subclasses_dmap) 
         gt_kmap = pad_zero(gt_kmap)
 
-        return img, gt_dmap, gt_dots, gt_subclasses_dmap, gt_kmap
+        return img, gt_dmap, gt_dots_or_gt_subclasses_dmap, gt_kmap
 
 
     def __getitem__(self,index):
+        pass
+
+
+class CellsDataset_test(CellsDataset_base):
+    def __init__(self,
+                 img_root:str, 
+                 class_indx:str, 
+                 split_filepath:str=None, 
+                 phase:str='train', 
+                 fixed_size:int=-1, 
+                 max_side:int=-1, 
+                 max_scale:int=-1):
+        """Dataset. It returns the image, the ground truth dilated dot map, the ground truth dot map, the pseudo-ground truth dilated dot map used for the deep clustering module, 
+        the pseudo-ground truth dot map used for the deep clustering module, the ground truth cross k-function map, and the image name.
+
+        Args:
+            img_root (str): path to the image folder
+            class_indx (str): a comma separated list of channel indices to return from the ground truth
+            gt_kmap_root (str): path to the folder containing the ground truth cross k-function maps.
+            split_filepath (str, optional): path to JSON file containing the information about the validation partition. If none, all the samples will be used. Defaults to None.
+            phase (str, optional): 'train' or 'test'. Defaults to 'train'.
+            fixed_size (int, optional): If >0, the dataset will pass crops of a fixed size during training. Defaults to -1.
+            max_side (int, optional): indicates whether to have a maximum side length during training. Defaults to -1.
+            max_scale (int, optional): apply padding to make the patch side divisible by max_scale. Defaults to -1.
+        """
+
+        super(CellsDataset_test, self).__init__(img_root, class_indx, '', split_filepath, phase, fixed_size, max_side, max_scale)
+
+    def __getitem__(self,index):
+            assert index <= len(self), 'index range error'
+            # Read image, normalize it, and make sure it is in RGB format
+            img_name=self.img_names[index]
+            array = torch.from_numpy(np.load(img_name, allow_pickle=True).astype(np.float32))
+
+            img = array[...,:3] / 255.
+            gt_dots = array[...,5:8] 
+            gt_dmap = array[...,8:11]
+            gt_kmap = array[...,11:32] 
+
+            del array
+
+            # Covert image and ground truth to pytorch format
+            img = img.permute((2,0,1)) # convert to order (channel,rows,cols)
+            gt_kmap = gt_kmap.permute((2,0,1)) # convert to order (channel,rows,cols)
+
+            if len(self.class_indx_list) > 1:
+                gt_dmap = gt_dmap.permute((2,0,1)) # convert to order (channel,rows,cols)
+                gt_dots = gt_dots.permute((2,0,1)) # convert to order (channel,rows,cols)
+            else: 
+                gt_dmap=gt_dmap[...,:,:]
+                gt_dots=gt_dots[...,:,:]
+            
+            # Add padding to make sure image dimensions are divisible by max_scale
+            if self.max_scale > 1: # to downsample image and density-map to match deep-model.
+                img, gt_dmap, gt_dots, gt_kmap = self._apply_padding(img, gt_dmap, gt_dots, gt_kmap)
+            
+            return img, gt_dmap, gt_dots, gt_kmap, img_name
+
+
+class CellsDataset_train(CellsDataset_base):
+    def __init__(self,
+                 img_root:str, 
+                 class_indx:str, 
+                 gt_dmap_subclasses_root:str, 
+                 split_filepath:str=None, 
+                 phase:str='train', 
+                 fixed_size:int=-1, 
+                 max_side:int=-1, 
+                 max_scale:int=-1):
+        """Dataset. It returns the image, the ground truth dilated dot map, the ground truth dot map, the pseudo-ground truth dilated dot map used for the deep clustering module, 
+        the pseudo-ground truth dot map used for the deep clustering module, the ground truth cross k-function map, and the image name.
+
+        Args:
+            img_root (str): path to the image folder
+            class_indx (str): a comma separated list of channel indices to return from the ground truth
+            gt_dmap_subclasses_root (str): path to the folder containing the pseudo-ground truth dilated dot maps used for the deep clustering module.
+            gt_kmap_root (str): path to the folder containing the ground truth cross k-function maps.
+            split_filepath (str, optional): path to JSON file containing the information about the validation partition. If none, all the samples will be used. Defaults to None.
+            phase (str, optional): 'train' or 'test'. Defaults to 'train'.
+            fixed_size (int, optional): If >0, the dataset will pass crops of a fixed size during training. Defaults to -1.
+            max_side (int, optional): indicates whether to have a maximum side length during training. Defaults to -1.
+            max_scale (int, optional): apply padding to make the patch side divisible by max_scale. Defaults to -1.
+        """
+
+        super(CellsDataset_train, self).__init__(img_root, class_indx, gt_dmap_subclasses_root, split_filepath, phase, fixed_size, max_side, max_scale)
+
+    def __getitem__(self,index):
+
         assert index <= len(self), 'index range error'
         # Read image, normalize it, and make sure it is in RGB format
         img_name=self.img_names[index]
         array = torch.from_numpy(np.load(img_name, allow_pickle=True).astype(np.float32))
 
         img = array[...,:3] / 255.
-        gt_dots = array[...,5:8]
         gt_dmap = array[...,8:11]
         gt_kmap = array[...,11:32] 
+
+        del array
         
         # Read pseudo ground truth class sub clusters dilated dot maps
-        if self.phase == 'train':
-            name_aux = os.path.sep.join(os.path.normpath(img_name).split(os.path.sep)[-2:])
-            gt_subclasses_path = os.path.join(self.gt_dmap_subclasses_root,name_aux.replace('.png','.npy'));
-            gt_subclasses_path2 = os.path.join(self.gt_dmap_subclasses_root,name_aux.replace('.png','.png.npy'));
-            # logger.info(gt_subclasses_path)
-            if(os.path.isfile(gt_subclasses_path)):
-                gt_subclasses_dmap=np.load(gt_subclasses_path, allow_pickle=True).squeeze()
-            elif(os.path.isfile(gt_subclasses_path2)):
-                gt_subclasses_dmap=np.load(gt_subclasses_path2, allow_pickle=True).squeeze()
-            else:
-                gt_subclasses_dmap=np.zeros((img.shape[0], img.shape[1], len(self.class_indx_list)*5))
+        name_aux = os.path.sep.join(os.path.normpath(img_name).split(os.path.sep)[-2:])
+        gt_subclasses_path = os.path.join(self.gt_dmap_subclasses_root,name_aux.replace('.png','.npy'));
+        gt_subclasses_path2 = os.path.join(self.gt_dmap_subclasses_root,name_aux.replace('.png','.png.npy'));
+        
+        if(os.path.isfile(gt_subclasses_path)):
+            gt_subclasses_dmap = np.load(gt_subclasses_path, allow_pickle=True).squeeze()
+        elif(os.path.isfile(gt_subclasses_path2)):
+            gt_subclasses_dmap = np.load(gt_subclasses_path2, allow_pickle=True).squeeze()
         else:
-            gt_subclasses_dmap = None
-        gt_subclasses_dmap = torch.from_numpy(gt_subclasses_dmap.astype(np.float32)) if self.phase == 'train' else None
-
+            gt_subclasses_dmap = np.zeros((img.shape[0], img.shape[1], len(self.class_indx_list)*5))
+        gt_subclasses_dmap = torch.from_numpy(gt_subclasses_dmap.astype(np.float32))
 
         # Covert image and ground truth to pytorch format
-        img=img.permute((2,0,1)) # convert to order (channel,rows,cols)
-        gt_kmap=gt_kmap.permute((2,0,1)) # convert to order (channel,rows,cols)
+        img = img.permute((2,0,1)) # convert to order (channel,rows,cols)
+        gt_kmap = gt_kmap.permute((2,0,1)) # convert to order (channel,rows,cols)
+
         if len(self.class_indx_list) > 1:
-            gt_dmap=gt_dmap.permute((2,0,1)) # convert to order (channel,rows,cols)
-            gt_dots=gt_dots.permute((2,0,1)) if self.phase == 'test' else None# convert to order (channel,rows,cols)
-            gt_subclasses_dmap=gt_subclasses_dmap.permute((2,0,1)) if self.phase == 'train' else None # convert to order (channel,rows,cols)
+            gt_dmap = gt_dmap.permute((2,0,1)) # convert to order (channel,rows,cols)
+            gt_subclasses_dmap = gt_subclasses_dmap.permute((2,0,1)) # convert to order (channel,rows,cols)
+
         else: 
             gt_dmap=gt_dmap[...,:,:]
-            gt_dots=gt_dots[...,:,:]  if self.phase == 'test' else None
-            gt_subclasses_dmap=gt_subclasses_dmap[...,:,:] if self.phase == 'train' else None
+            gt_subclasses_dmap=gt_subclasses_dmap[...,:,:] 
+        
 
-        if self.phase == 'train':
-            img, gt_dmap, gt_subclasses_dmap, gt_kmap = self._augment(img, gt_dmap, gt_subclasses_dmap, gt_kmap)
+        img, gt_dmap, gt_subclasses_dmap, gt_kmap = self._augment(img, gt_dmap, gt_subclasses_dmap, gt_kmap)
 
         # Add padding to make sure image dimensions are divisible by max_scale
-        if self.max_scale>1: # to downsample image and density-map to match deep-model.
-            img, gt_dmap, gt_dots, gt_subclasses_dmap, gt_kmap = self._apply_padding(img, gt_dmap, gt_dots, gt_subclasses_dmap, gt_kmap)
+        if self.max_scale > 1: # to downsample image and density-map to match deep-model.
+            img, gt_dmap, gt_subclasses_dmap, gt_kmap = self._apply_padding(img, gt_dmap, gt_subclasses_dmap, gt_kmap)
         
-        # if gt_kmap.shape[0] != 21:
-        #     print(f'Error at {img_name}')
-
-        if self.phase == 'train':
-            return img,gt_dmap, gt_subclasses_dmap, gt_kmap, [img_name]
-        else:
-            return img, gt_dmap, gt_dots, gt_kmap, [img_name]
-
+        return img ,gt_dmap, gt_subclasses_dmap, gt_kmap, img_name

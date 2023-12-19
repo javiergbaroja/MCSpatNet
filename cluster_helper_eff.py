@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader
 import os
 from tqdm import tqdm as tqdm
 import skimage.io as io
@@ -24,16 +25,12 @@ logger = create_logger('cluster_helper')
 device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def collect_features_by_class(model, simple_train_loader, feature_indx_list, n_classes):
-    # logger.info('----------------Started extracting features features')
     img_has_centroids = [[False]*len(simple_train_loader.dataset) for i in range(n_classes)] 
-    # features = [None for i in range(n_classes)] # to be a list of numpy array of shape (n_cells, n_features)
     features_list = [[None]*len(simple_train_loader.dataset) for i in range(n_classes)]    # imp to avoid referencing the same list in all entries
     coord_list = [[0]*len(simple_train_loader.dataset) for i in range(n_classes)] # imp to avoid referencing the same list in all entries
     model.eval()
     idx = 0
     with torch.no_grad():
-        # with tqdm(simple_train_loader, unit='batch', desc=f"Clustering feat_extract", ascii=' =', dynamic_ncols=True) as batch_loader:
-        #     for (img,__,gt_dots,__, padding) in batch_loader:
             for (img,__,gt_dots,__, padding) in simple_train_loader:
                 # padding: padding added to the image to make sure it is a multiple of 16 (corresponding to 4 max pool layers)
                 pad_y1  = padding[0].numpy()[0]
@@ -41,14 +38,10 @@ def collect_features_by_class(model, simple_train_loader, feature_indx_list, n_c
                 pad_x1  = padding[2].numpy()[0]
                 pad_x2  = padding[3].numpy()[0]
 
-                # set the image filename
-                # img=img.to(device)
-
                 # get the ground truth dot map for all cells without the padding
                 gt_dots = gt_dots[:,:,pad_y1:gt_dots.shape[-2]-pad_y2,pad_x1:gt_dots.shape[-1]-pad_x2]
-                gt_dots = gt_dots.cpu().numpy().squeeze()
+                gt_dots = gt_dots.cpu().numpy()
                 # get the image features from the model
-                # with torch.autocast(device_type='cuda', dtype=torch.float16):
                 et_dmap_lst, img_feats = model(x=img, feat_indx_list=feature_indx_list)
                 img_feats = img_feats[:,:,2:-2,2:-2]
                 img_feats = img_feats[:,:,pad_y1:img_feats.shape[-2]-pad_y2,pad_x1:img_feats.shape[-1]-pad_x2]
@@ -57,16 +50,14 @@ def collect_features_by_class(model, simple_train_loader, feature_indx_list, n_c
                 del et_dmap_lst 
 
                 for j in range(len(img_feats)):
-                    img_feat = img_feats[j].squeeze().permute((1,2,0)).numpy()
+                    img_feat = img_feats[j].permute((1,2,0)).numpy()
                     gt_dot = gt_dots[j]
 
                     has_centroids = [sc_any(gt_dot[i,...]) for i in range(gt_dot.shape[0])]
                     if any(has_centroids):
                         points_all = np.where(gt_dot > 0)
                         for s in range(len(has_centroids)):
-                            # assert len(coord_list[s]) > idx, f'length {len(coord_list[s])} index  {idx} class {s}'
                             if not has_centroids[s]:
-                                # logger.debug(f'length {len(coord_list[s])} index  {idx} class {s}')
                                 coord_list[s][idx] = (np.array([], dtype=np.int64), np.array([], dtype=np.int64))
                                 continue
                             pos = (points_all[0] == s)
@@ -82,24 +73,12 @@ def collect_features_by_class(model, simple_train_loader, feature_indx_list, n_c
 
     empty_trash()
     features_list = [np.vstack(list(filter(lambda ele:ele is not None, class_features))) for class_features in features_list]
-
-
-                    # for s in range(len(gt_dot.shape[0])):
-                    #     if not gt_dot.shape[0]:
-                    #         continue
-                    #     points = np.where(gt_dot[s] > 0)
-                    #     coord_list[s][idx] = points
-                    #     img_has_centroids[s][idx] = True
-                    #     img_feat_s = img_feat[points]
-                    #     features_list[s][idx] = img_feat_s
-                    # idx += 1 
                                 
     logger.info('----------------Finished extracting features')
     return features_list, img_has_centroids, coord_list
     
 def cluster(features_array, img_has_centroids,coord_list, n_clusters, prev_centroids):
     # For each class, get all features and do kmeans clustering, then use the fitted kmeans to get the pseudo clustering label for each cell
-    # logger.info('----------------Started K-means clustering')
     cluster_centers_all = None
     pseudo_labels_list = [[None]*len(img_has_centroids[0]) for i in range(len(img_has_centroids))]
     for s in range(len(features_array)):
@@ -109,7 +88,7 @@ def cluster(features_array, img_has_centroids,coord_list, n_clusters, prev_centr
             kmeans = KMeans(n_clusters=n_clusters, random_state=0, n_init=10)
             
         else:
-            kmeans = KMeans(n_clusters=n_clusters, init=prev_centroids[s*n_clusters:s*n_clusters+n_clusters], n_init=10)
+            kmeans = KMeans(n_clusters=n_clusters, init=prev_centroids[s*n_clusters:s*n_clusters+n_clusters])
         preds = kmeans.fit_predict(np.nan_to_num(features_array[s], copy=True, nan=0.0)) if features_array[s] is not None else None 
 
         # Predict the cluster label for each cell
@@ -122,10 +101,6 @@ def cluster(features_array, img_has_centroids,coord_list, n_clusters, prev_centr
             pseudo_labels_list[s][i] = preds[pos:pos+n_centroids]
             pos += n_centroids
 
-            # if(features_list[s][i] is None):
-            #     pseudo_labels_list[s][i] = None
-            #     continue
-            # pseudo_labels_list[s][i] = kmeans.predict(features_list[s][i])
         if(cluster_centers_all is None):
             cluster_centers_all = kmeans.cluster_centers_
         else:
@@ -138,9 +113,9 @@ def create_pseudo_lbl_gt(simple_train_loader, pseudo_labels_list, coord_list, n_
     # logger.info('----------------Start saving pseudo-label files')
     n_subclasses = len(pseudo_labels_list) * n_clusters # number of sub classes is number of cell classes * number of clusters
     i = 0
+    simple_train_loader = DataLoader(simple_train_loader.dataset, batch_size=30, shuffle=False, num_workers=14)
     with tqdm(simple_train_loader, unit='batch', desc=f"Clustering save", ascii=' =', dynamic_ncols=True) as batch_loader:
         for __,gt_dmaps,__, img_names, paddings in batch_loader:
-    # for __,gt_dmaps,__, img_names, paddings in simple_train_loader:
             ''' 
                 img: input image
                 gt_dmap: ground truth map for cell classes (lymphocytes, epithelial/tumor, stromal) with dilated dots. This can be a binary mask or a density map ( in which case it will be converted to a binary mask)
@@ -153,7 +128,6 @@ def create_pseudo_lbl_gt(simple_train_loader, pseudo_labels_list, coord_list, n_
             pads_x1  = paddings[2].numpy()
             pads_x2  = paddings[3].numpy()
             # get the ground truth maps without the padding
-            # gt_dots = gt_dots[:,:,pad_y1:gt_dots.shape[-2]-pad_y2,pad_x1:gt_dots.shape[-1]-pad_x2]
             # Convert ground truth maps to binary mask (in case they were density maps)
             gt_dmaps = gt_dmaps > 0
 
@@ -169,10 +143,7 @@ def create_pseudo_lbl_gt(simple_train_loader, pseudo_labels_list, coord_list, n_
 
                 # Initialize the ground truth maps for the clustering sub-classes
                 gt_dmap_all =  gt_dmap.max(0)[0] # dim 0 is squeezed in loop
-                # gt_dots_all =  gt_dots.max(1)[0] 
                 gt_dmap_all = gt_dmap_all.numpy().squeeze()
-                # gt_dots_all = gt_dots_all.detach().cpu().numpy().squeeze()
-                # gt_dots_subclasses = np.zeros((gt_dmap_all.shape[0], gt_dmap_all.shape[1], n_subclasses+1))
                 gt_dmap_subclasses = np.zeros((gt_dmap_all.shape[0], gt_dmap_all.shape[1], n_subclasses))
 
                 label_comp = label(gt_dmap_all)
@@ -184,11 +155,6 @@ def create_pseudo_lbl_gt(simple_train_loader, pseudo_labels_list, coord_list, n_
                         continue
                     points = coord_list[s][i]
                     for c in range(n_clusters):
-                        
-                        # Set the dot map for the cell-sub-cluster
-                        # gt_map_tmp = np.zeros((gt_dmap_all.shape[0], gt_dmap_all.shape[1]))
-                        # gt_map_tmp [(points[0][(pseudo_labels == c)], points[1][(pseudo_labels == c)])]=1
-                        # gt_dots_subclasses[:,:,cci] = gt_map_tmp
 
                         # Set the dilated dot map (mask) for the cell-sub-cluster.
                         gt_map_tmp = np.zeros((gt_dmap_subclasses.shape[0],gt_dmap_subclasses.shape[1]))
@@ -202,8 +168,6 @@ def create_pseudo_lbl_gt(simple_train_loader, pseudo_labels_list, coord_list, n_
                         # io.imsave(os.path.join(out_dir, img_name_list[i].replace('.png','_gt_dmap_s'+str(s)+'_c'+str(c)+'.png')), (gt_map_tmp*255).astype(np.uint8))
 
                 # Save generated ground truth maps for the current image
-                # gt_dots_subclasses.astype(np.uint8).dump(os.path.join(out_dir, img_name_list[i].replace('.png','_gt_dots.npy')))
-
                 file_path = os.path.sep.join(os.path.normpath(img_name).split(os.path.sep)[-2:])
                 file_path = os.path.join(out_dir, file_path)
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
@@ -213,7 +177,7 @@ def create_pseudo_lbl_gt(simple_train_loader, pseudo_labels_list, coord_list, n_
     logger.info('----------------Finished saving pseudo-label files')
         
 
-def perform_clustering(model, simple_train_loader, n_clusters, n_classes, feature_indx_list, out_dir, prev_centroids,using_crops:bool=False):
+def perform_clustering(model, simple_train_loader, n_clusters, n_classes, feature_indx_list, out_dir, prev_centroids, using_crops:bool=False):
     '''
         model: MCSpatNet model being trained
         simple_train_loader: data loader for training data to iterate over input

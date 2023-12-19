@@ -353,97 +353,62 @@ if __name__=="__main__":
                         et_all_sig = et_all_sig.cpu().numpy()
                         et_class_sig = et_class_sig.cpu().numpy()
                         
-                        
+                        # start_time = time.time()
                         # Calculate F-score if epoch >= epoch_start_eval_prec
                         if(epoch >= epoch_start_eval_prec):
-                            # Apply a 0.5 threshold on detection output and convert to binary mask
-                            e_hard = filters.apply_hysteresis_threshold(et_all_sig.squeeze(), 0.5, 0.5)            
-                            e_hard2 = (e_hard > 0).astype(np.uint8)
-                            e_hard2_all = e_hard2.copy() 
-                            for k in range(len(img)):
-                            # Get predicted cell centers by finding center of contours in binary mask
-                                e_dot = np.zeros((img.shape[-2], img.shape[-1]))
-                                contours, hierarchy = cv2.findContours(e_hard2[k], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-                                for idx in range(len(contours)):
-                                    contour_i = contours[idx]
-                                    M = cv2.moments(contour_i)
-                                    if(M['m00'] == 0):
-                                        continue;
-                                    cx = round(M['m10'] / M['m00'])
-                                    cy = round(M['m01'] / M['m00'])
-                                    e_dot[cy, cx] = 1
-                                e_dot_all = e_dot.copy()
+                            
+                            for k in range(gt_dots_all.shape[0]):
+                                # Apply a 0.5 threshold on detection output and convert to binary mask
+                                e_hard2 = filters.apply_hysteresis_threshold(et_all_sig[k].squeeze(0), 0.5, 0.5)            
+                                e_hard2 = (e_hard2 > 0).astype(np.uint8)
+                                e_hard2_all = e_hard2.copy() 
 
-                                tp_count = 0 # initialize number of true positives
-                                fp_count = 0 # initialize number of false positives
-                                fn_count = 0 # initialize number of false negatives
-                                # Init g_dot_vis to contain all cell detections ground truth dots
-                                g_dot_vis = gt_dots_all[k].copy().squeeze()
-                                # Get connected components in the predicted detection binary map
-                                e_hard2_comp = label(e_hard2[k])
-                                e_hard2_comp_all = e_hard2_comp.copy()
-                                # For each connected component, if it interests with a grount truth dot then it is a TP, otherwise it is a FP.
-                                # If it is a TP, remove it from g_dot_vis.
+                                e_hard2 = label(e_hard2)
+                                counter = Counter(e_hard2.flatten())
+                                filtered_counter = {key: value for key, value in counter.items() if value <= 3} # remove objects with less than 3 pixels
+                                remove_labels = list(filtered_counter.keys())
+                                mask = np.isin(e_hard2, remove_labels)
+                                e_hard2[mask] = 0
+
+                                props = regionprops_table(e_hard2, properties=['centroid'])
+                                e_hard2 = (e_hard2 > 0).astype(np.uint8)
+
+                                e_dot_all = np.zeros_like(e_hard2)
+                                e_dot_all[..., props['centroid-0'].astype(np.int32), props['centroid-1'].astype(np.int32)] = 1
+
+
+                                label_e_hard2 = label(e_hard2_all)
+                                total_g_nuclei = int(gt_dots_all[k].sum())
+                                total_e_nuclei = np.unique(label_e_hard2).shape[0] - 1
+                                # detection true positives are the number intersections between the ground truth and the detections
                                 # Note: if more than one ground truth dot interests, then only one is a TP.
-                                for l in range(1, e_hard2_comp.max()+1):
-                                    e_hard2_comp_l = (e_hard2_comp == l)
-                                    M = moments(e_hard2_comp_l)
-                                    (y,x) = int(M[1, 0] / M[0, 0]), int(M[0, 1] / M[0, 0])
-                                    if ((e_hard2_comp_l * g_dot_vis).sum()>0): # true pos
-                                        tp_count += 1
-                                        (yg,xg) = np.where((e_hard2_comp_l * g_dot_vis) > 0)
-                                        yg = yg[0]
-                                        xg = xg[0]
-                                        g_dot_vis[yg,xg] = 0 
-                                    else: #((e_hard2_comp_l * g_dot_vis).sum()==0): # false pos
-                                        fp_count += 1
-                                # Remaining cells in g_dot_vis are False Negatives.
-                                fn_points = np.where(g_dot_vis > 0)
-                                fn_count = len(fn_points[0])
+                                tp_count = np.unique(label_e_hard2 * gt_dots_all[k]).shape[0] - 1
+                                tp_count_all[-1] += tp_count
 
-                                # Update TP, FP, FN counts for detection with counts from current image predictions
-                                tp_count_all[-1] = tp_count_all[-1] + tp_count
-                                fp_count_all[-1] = fp_count_all[-1] + fp_count
-                                fn_count_all[-1] = fn_count_all[-1] + fn_count
+                                # False positives is the same but with the part of the image that is not nuclei
+                                fp_count_all[-1] += total_e_nuclei - tp_count
 
-                                # Get predicted cell classes
-                                et_class_argmax = et_class_sig[k].squeeze().argmax(axis=0)
-                                e_hard2_all = e_hard2[k].copy()
-                                # For each class get the TP, FP, FN counts similar to previous detection code.
+                                # False negatives are the part of the GT centers that do not intersect with the detections (292)
+                                fn_count_all[-1] += total_g_nuclei - tp_count
+
+                                # Now the same approach but per class
                                 for s in range(n_classes):
-                                    g_count = gt_dots[k,s,:,:].sum()
-                                    e_hard2_s = (et_class_argmax == s)  
-                                    e_dot = e_hard2_s * e_dot_all  
-                                    g_dot = gt_dots[k,s,:,:].squeeze()
 
-                                    tp_count = 0
-                                    fp_count = 0
-                                    fn_count = 0
-                                    g_dot_vis = g_dot.copy()
-                                    e_dots_tuple = np.where(e_dot > 0)
-                                    for idx in range(len(e_dots_tuple[0])):
-                                        cy=e_dots_tuple[0][idx]
-                                        cx=e_dots_tuple[1][idx]
-                                        l = e_hard2_comp_all[cy, cx]
-                                        e_hard2_comp_l = (e_hard2_comp == l)
-                                        if ((e_hard2_comp_l * g_dot_vis).sum()>0): # true pos
-                                            tp_count += 1
-                                            (yg,xg) = np.where((e_hard2_comp_l * g_dot_vis) > 0)
-                                            yg = yg[0]
-                                            xg = xg[0]
-                                            g_dot_vis[yg,xg] = 0 
-                                        else: #((e_hard2_comp_l * g_dot_vis).sum()==0): # false pos
-                                            fp_count += 1
-                                    fn_points = np.where(g_dot_vis > 0)
-                                    fn_count = len(fn_points[0])
+                                    et_class_argmax = et_class_sig[k].argmax(axis=0)
+                                    e_hard2 = (et_class_argmax == s)  
+                                    g_dot = gt_dots[k,s,...]
 
-
-                                    tp_count_all[s] = tp_count_all[s] + tp_count
-                                    fp_count_all[s] = fp_count_all[s] + fp_count
-                                    fn_count_all[s] = fn_count_all[s] + fn_count
+                                    e_dot = (e_hard2 * e_dot_all)
+                                    e_centroids = np.array(np.where(e_dot>0)).T
+                                    g_centroids = np.array(np.where(g_dot>0)).T
+                                    paired, unpaired_true, unpaired_pred = pair_coordinates(g_centroids, e_centroids, 6)
+                                    tp_count_all[s] += len(paired)
+                                    fp_count_all[s] += len(unpaired_pred)
+                                    fn_count_all[s] += len(unpaired_true)
 
                         batch_loader.set_postfix({"DiceLoss": loss_dice, "K-FuncLoss":loss_l1_k})
-
+                        # start_time = time.time()
+            del img, gt_dmap, gt_dots, gt_kmap
             empty_trash()
             logger.info('------------validation-loss-detect: {:.4f}'.format(loss_val_detect/len(test_loader)))
             logger.info('------------validation-loss-class: {:.4f}'.format(loss_val_class/len(test_loader)))

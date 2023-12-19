@@ -1,49 +1,25 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torchvision import models
-import collections
-from distutils.util import strtobool;
 import numpy as np  
-import sys
 from utils import create_logger
 from sa_net_arch_utilities_pytorch import CNNArchUtilsPyTorch;
 
 from model_arch import UnetVggMultihead
-import math
+from loss_functions import asym_unified_focal_loss, ce_plus_dice_loss
 
 logger = create_logger('UnetVggMultihead_custom')
-
-def dice_loss(pred:torch.Tensor, target:torch.Tensor, smooth:float=1e-3, reduction:str='mean')->torch.Tensor:
-    """Assuming of shape BxCxHxW."""
-    if reduction =='sum':
-        intse = torch.sum(pred * target, (0, 2, 3)) # sum of intersection per class
-        union = torch.sum(pred**2, (0, 2, 3)) + torch.sum(target**2, (0, 2, 3)) # sum of union per class
-        loss = 1.0 - (2.0 * intse + smooth) / (union + smooth) # loss per class
-        loss = loss.sum() # loss (aggregation over classes)
-        
-    else:
-        intse = torch.sum(pred * target, (2,3)) # sum of intersection per mask and class
-        union = torch.sum(pred**2, (2, 3)) + torch.sum(target**2, (2, 3)) # sum of union per mask and class
-        loss = 1.0 - (2.0 * intse + smooth) / (union + smooth) # loss per mask and class
-        loss = loss.sum(1) # loss per mask (aggregation over classes)
-
-    # if math.isnan(pred.sum()):
-    #     print('Nan pred', file=sys.stderr)
-    # if math.isnan(target.sum()):
-    #     print('Nan target', file=sys.stderr)
-    # if math.isnan(intse.sum()):
-    #     print('Nan intersect', file=sys.stderr)
-    # if math.isnan(union.sum()):
-    #     print('Nan union', file=sys.stderr)
-    # if math.isnan(loss.sum()):
-    #     print('Nan loss', file=sys.stderr)
-    
-    return loss
 
 class UnetVggMultihead_custom(UnetVggMultihead):
     def __init__(self, load_weights=False, kwargs=None):
         super().__init__(load_weights, kwargs)
+        self.use_dice_loss = kwargs['use_dice_loss']
+        self.use_ce_loss = kwargs['use_ce_loss']
+        self.use_paper_loss = True
+        if not self.use_dice_loss and not self.use_ce_loss:
+            raise ValueError('At least one of dice or cross-entropy loss must be used for cell detection and classification branches')
+        if self.use_paper_loss:
+            self.loss_func_seg = asym_unified_focal_loss()
+        else:
+            self.loss_func_seg = ce_plus_dice_loss(reduction='mean', dice=self.use_dice_loss, ce=self.use_ce_loss)
 
     def forward_net(self, x, feat_indx_list, feat_as_dict):
         '''
@@ -114,9 +90,7 @@ class UnetVggMultihead_custom(UnetVggMultihead):
                 'gt_dmap_all':torch.Tensor
                 'gt_dmap':torch.Tensor
                 'gt_dmap_subclasses':torch.Tensor
-                'gt_kmap': dict
-                    'tensor':torch.Tensor
-                    'r_classes_all':int
+                'gt_kmap': torch.Tensor
             loss_fns (list): loss functions
                 'criterion_l1_sum'
                 'criterion_sig'
@@ -141,21 +115,21 @@ class UnetVggMultihead_custom(UnetVggMultihead):
 
         # Apply K function loss only on the detection mask regions
         k_loss_mask = gt['gt_dmap_all'].clone() 
-        loss_l1_k = loss_fns['criterion_l1_sum'](et_kmap*(k_loss_mask), gt['gt_kmap']['tensor']*(k_loss_mask)) 
+        loss_l1_k = loss_fns['criterion_l1_sum'](et_kmap*(k_loss_mask), gt['gt_kmap']*(k_loss_mask)) 
 
         # Apply Sigmoid and Softmax activations to the detection and classification predictions, respectively.
         et_all_sig = loss_fns['criterion_sig'](et_dmap_all)
         et_class_sig = loss_fns['criterion_softmax'](et_dmap_class)
 
         # Compute Dice loss on the detection and classification predictions
-        loss_dice_class = dice_loss(et_class_sig, gt['gt_dmap'], reduction='mean')
-        loss_dice_all = dice_loss(et_all_sig, gt['gt_dmap_all'], reduction='mean')
+        loss_dice_class = self.loss_func_seg(et_class_sig, gt['gt_dmap'])
+        loss_dice_all = self.loss_func_seg(et_all_sig, gt['gt_dmap_all'])
 
         if phase == 'test':
             return loss_dice_all, loss_dice_class, loss_l1_k, et_all_sig, et_class_sig
         
         et_subclasses_sig = loss_fns['criterion_softmax'](et_dmap_subclasses)
-        loss_dice_subclass = dice_loss(et_subclasses_sig, gt['gt_dmap_subclasses'], reduction='mean')
+        loss_dice_subclass = self.loss_func_seg(et_subclasses_sig, gt['gt_dmap_subclasses'])
 
         return loss_dice_all, loss_dice_class, loss_dice_subclass, loss_l1_k
     

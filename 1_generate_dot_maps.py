@@ -10,70 +10,9 @@ import scipy
 import argparse
 sys.path.append("/storage/homefs/jg23p152/project")
 from hover_net.misc.utils import parse_json_file
-import logging
 from tqdm import tqdm
-
-'''
-Original cell classes:
-          1 = other 
-	      2 = inflammatory 
-	      3 = healthy epithelial 
-	      4 = dysplastic/malignant epithelial 
-          5 = fibroblast 
-          6 = muscle  
-	      7 = endothelial 
-Grouped cell Classes: 
-	      1 = inflammatory (sky blue)
-	      2 = All epithelial (healthy epithelial + dysplastic/malignant epithelial) (red)
-          3 = All stromal (fibroblast +  muscle  + endothelial + other) (green) 
-'''
-
-"""
-    This code assumes the input has the following format:
-        - Within <in_root_dir>: 
-            Images folder: the image patches labelled from that slide 
-            Labels folder: the mat files with the labels for each patch in images
-        - The mat file has the following variables: 
-            inst_centroid: array of shape n x 2, n is number of cells, and coordinates are (x,y)
-            inst_type: array holding the cell class type for each cell in inst_centroid. The class types are sequential integers starting from 1. 
-                        This is why the color_set dictionary has keys starting from 1 that represent the cell class types.
-
-"""
-def create_logger():
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    # Write logs to the SLURM output file
-    file_handler = logging.StreamHandler(sys.stdout)
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    return logger
-
-
-def divide_list(lst, n):
-    division_size = len(lst) // n
-    divisions = [lst[i * division_size:(i + 1) * division_size] for i in range(n - 1)]
-    divisions.append(lst[(n - 1) * division_size:])
-    return divisions
-
-
-def get_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--root_dir", type=str, default="/storage/homefs/jg23p152/project",)
-    parser.add_argument("--json_info_file_path", type=str, default="/storage/homefs/jg23p152/project/Data/Split_files/training_set_files_debug.json",
-                        help="Path to the json with the dataset info")
-    parser.add_argument("--out_root_dir", type=str, default="./MCSpatNet/datasets/Lizard",
-                        help="Path to the output root directory")
-    parser.add_argument("--dataset", type=str, default="lizard",
-                        help="Name of the dataset")
-    parser.add_argument("--nr_types", type=int, default=4,
-                        help="Number of cell types, counting background as one type")
-    parser.add_argument("--grouping_dict", type=str, default="1:1,2:2,3:3")
-
-    args = parser.parse_args()
-    args.grouping_dict = {int(k): [int(i) for i in v.split('-')] for k, v in [i.split(':') for i in args.grouping_dict.split(',')]}
-    return args
+from utils import get_gt_extract_args, create_logger, divide_list
+from natsort import natsorted
 
 class LabelHandler():
     def __init__(self, 
@@ -86,7 +25,8 @@ class LabelHandler():
                  subtyping:bool=True,
                  type2subtype:int=2,
                  remove_duplicates:bool=False,
-                 save_vis:bool=True) -> None:
+                 save_vis:bool=True,
+                 save_as_crops:bool=False) -> None:
         
         
         self.dataset = dataset
@@ -99,9 +39,13 @@ class LabelHandler():
         self.type2subtype = type2subtype
         self.remove_duplicates = remove_duplicates
         self.save_vis = save_vis
+        self.save_as_crops = save_as_crops
         self.root_dir = None
         self.out_img_dir = None
         self.out_gt_dir = None
+        self.win_size=[] 
+        self.step_size=[]
+        
 
         if dataset.lower() == "tcga":
             self.centroid_key = "inst_centroid"
@@ -115,8 +59,14 @@ class LabelHandler():
     def _set_root_dir(self, root_dir:str):
         self.root_dir = root_dir
         return
+    
+    def _get_coords_from_filename(self, filename:str):
+        return [[int(os.path.splitext(filename)[0].split("x")[1].split("_")[1]), 
+                 int(os.path.splitext(filename)[0].split("x")[1].split("_")[2])], 
+                [int(os.path.splitext(filename)[0].split("y")[1].split("_")[1]), 
+                 int(os.path.splitext(filename)[0].split("y")[1].split("_")[2])]]
 
-    def _gaussian_filter_density(self, img, points, point_class_map, out_filepath, start_y=0, start_x=0, end_y=-1, end_x=-1):
+    def _gaussian_filter_density(self, img, points, point_class_map, out_filepath, start_y=0, start_x=0, end_y=-1, end_x=-1, save:bool=True):
         '''
             Build a KD-tree from the points, and for each point get the nearest neighbor point.
             The default Guassian width is 9.
@@ -172,20 +122,22 @@ class LabelHandler():
             density += pnt_density
             class_indx = point_class_map[int(pt[1]), int(pt[0])].argmax()
             density_class[:, :, class_indx] = density_class[:, :, class_indx] + pnt_density
+        if save:
 
-        #density_class.astype(np.float16).dump(out_filepath)
-        #density.astype(np.float16).dump(os.path.splitext(out_filepath)[0] + '_all.npy')
-        (density_class > 0).astype(np.uint8).dump(out_filepath)
-        (density > 0).astype(np.uint8).dump(os.path.splitext(out_filepath)[0] + '_all.npy')
-        #io.imsave(out_filepath.replace('.npy', '.png'), (density / density.max() * 255).astype(np.uint8))
-        io.imsave(out_filepath.replace('.npy', '_binary.png'), ((density > 0) * 255).astype(np.uint8))
-        for s in range(1, density_class.shape[-1]):
-            io.imsave(out_filepath.replace('.npy', '_s' + str(s) + '_binary.png'),
-                    ((density_class[:, :, s] > 0) * 255).astype(np.uint8))
+            #density_class.astype(np.float16).dump(out_filepath)
+            #density.astype(np.float16).dump(os.path.splitext(out_filepath)[0] + '_all.npy')
+            (density_class > 0).astype(np.uint8).dump(out_filepath)
+            (density > 0).astype(np.uint8).dump(os.path.splitext(out_filepath)[0] + '_all.npy')
+            #io.imsave(out_filepath.replace('.npy', '.png'), (density / density.max() * 255).astype(np.uint8))
+            io.imsave(out_filepath.replace('.npy', '_binary.png'), ((density > 0) * 255).astype(np.uint8))
+            for s in range(1, density_class.shape[-1]):
+                io.imsave(out_filepath.replace('.npy', '_s' + str(s) + '_binary.png'),
+                        ((density_class[:, :, s] > 0) * 255).astype(np.uint8))
         logger.info('done.')
-        return density.astype(np.float16), density_class.astype(np.float16)
+        return (density > 0).astype(np.uint8),  (density_class > 0).astype(np.uint8)
     
     def _create_out_dirs(self, out_root_dir:str):
+
         self.out_img_dir = os.path.join(out_root_dir, 'images')
         self.out_gt_dir = os.path.join(out_root_dir, 'gt_custom')
 
@@ -208,7 +160,7 @@ class LabelHandler():
             centroids[(np.where(centroids[:, 1] >= img.shape[0]), 1)] = img.shape[0] - 1
             centroids[(np.where(centroids[:, 0] >= img.shape[1]), 0)] = img.shape[1] - 1
 
-        return img, centroids
+        return img, centroids.astype(int)
     
     
     
@@ -224,8 +176,9 @@ class LabelHandler():
             # Generated of ground truth classification dot annotation map
             for dot_class in range(1, self.nr_types):
                 patch_label_arr = np.zeros((img.shape[0], img.shape[1]))
-                patch_label_arr[(centroids[np.where(class_types == dot_class)][:, 1],
-                                    centroids[np.where(class_types == dot_class)][:, 0])] = 1
+                positions = np.where(class_types == dot_class)[0]
+                patch_label_arr[(centroids[positions][:, 1],
+                                 centroids[positions][:, 0])] = 1
                 patch_label_arr_dots[:, :, dot_class] = patch_label_arr
                 # patch_label_arr = ndimage.convolve(patch_label_arr, np.ones((5, 5)), mode='constant', cval=0.0)
                 # img_scaled[np.where(patch_label_arr > 0)] = color_set[dot_class]
@@ -284,7 +237,7 @@ class LabelHandler():
         io.imsave(os.path.join(self.out_gt_dir, img_name + '_img_with_dots.jpg'), img_scaled)
 
 
-    def _generate_gaussian_maps(self, img_scaled, patch_label_arr_dots, img_name):
+    def _generate_gaussian_maps(self, img_scaled:np.ndarray, patch_label_arr_dots:np.ndarray, img_name:str, save:bool=False):
         out_gt_dmap_filepath = os.path.join(self.out_gt_dir, img_name  + '.npy')
         mat_s_points = np.where(patch_label_arr_dots > 0)
         points = np.zeros((len(mat_s_points[0]), 2))
@@ -293,7 +246,10 @@ class LabelHandler():
         points[:, 1] = mat_s_points[0]
         patch_label_arr_dots_custom_all, patch_label_arr_dots_custom = self._gaussian_filter_density(img_scaled, points,
                                                                                                 patch_label_arr_dots,
-                                                                                                out_gt_dmap_filepath)
+                                                                                                out_gt_dmap_filepath,
+                                                                                                save=save)
+        return patch_label_arr_dots_custom_all, patch_label_arr_dots_custom
+    
     def _load_from_file_dict(self, file:dict):
         def _apply_cell_subtyping(mat:dict, file:dict):
             mat[self.class_key] = mat[self.class_key].squeeze()
@@ -325,16 +281,13 @@ class LabelHandler():
             mat = _apply_cell_subtyping(mat, file)
 
         return img, mat, img_name
-
-
-    def _create_gt_files(self, file:dict):
-
-        img, mat, img_name = self._load_from_file_dict(file)
-        img_scaled, patch_label_arr_dots = self._create_grouped_gt(img, mat)     
+    
+    def _save_files(self, img_scaled:np.ndarray, patch_label_arr_dots:np.ndarray, img_name:str):
 
         # Generate the detection ground truth dot map
         patch_label_arr_dots_all = patch_label_arr_dots[:, :, :].sum(axis=-1)
         # Save Dot maps
+
         patch_label_arr_dots.astype(np.uint8).dump(
             os.path.join(self.out_gt_dir, img_name + '_gt_dots.npy'))
         patch_label_arr_dots_all.astype(np.uint8).dump(
@@ -345,7 +298,66 @@ class LabelHandler():
 
         # Generate the Gaussian maps.
         # It is important to not do this for each class separately because this may result in intersections in the detection map
-        self._generate_gaussian_maps(img_scaled, patch_label_arr_dots, img_name)
+        _ = self._generate_gaussian_maps(img_scaled, patch_label_arr_dots, img_name)
+
+
+    def _create_gt_files(self, file_dict:dict):
+
+        img, mat, img_name = self._load_from_file_dict(file_dict)
+        img_scaled, patch_label_arr_dots = self._create_grouped_gt(img, mat)     
+
+        self._save_files(img_scaled, patch_label_arr_dots, img_name)        
+
+    
+    def _create_gt_files_from_crops(self, file_dict:dict):
+
+        def _pad_im(x:np.ndarray):
+            diff_h = self.win_size[0] - self.step_size[0]
+            padt = diff_h // 2
+            padb = diff_h - padt
+
+            diff_w = self.win_size[1] - self.step_size[1]
+            padl = diff_w // 2
+            padr = diff_w - padl
+
+            pad_type = "reflect"
+            return np.lib.pad(x, ((padt, padb), (padl, padr), (0, 0)), pad_type)
+
+        patches_dir = os.path.join(self.root_dir, file_dict['patches_dir'])
+        img_name = file_dict['img_id']
+        array_files = natsorted([os.path.basename(file) for file in glob.glob(os.path.join(patches_dir, '*.npy'))])
+        coords = [ self._get_coords_from_filename(file) for file in array_files]
+        assert len(array_files) == len(coords), f'Number of files {len(array_files)} does not match number of coordinates {len(coords)}'
+
+        img_whole, mat, img_name = self._load_from_file_dict(file_dict)
+        img_whole, patch_label_arr_dots_whole = self._create_grouped_gt(img_whole, mat)
+
+        patch_label_arr_dots_custom_all_whole, patch_label_arr_dots_custom_whole = self._generate_gaussian_maps(img_whole, patch_label_arr_dots_whole, img_name, save=False)
+        img_whole = _pad_im(img_whole)
+        patch_label_arr_dots_custom_whole = _pad_im(patch_label_arr_dots_custom_whole)
+        patch_label_arr_dots_whole = _pad_im(patch_label_arr_dots_whole)
+
+
+        for file, coord in zip(array_files, coords):
+            
+            crop_array = np.load(os.path.join(patches_dir, file), allow_pickle=True)[...,:5] # channels 0-3: img, 3: inst_map, 4: class_map
+            assert np.array_equal(crop_array[...,:3], img_whole[coord[0][0]:coord[0][1], coord[1][0]:coord[1][1]])
+            # we need the name.npy and the name_gt_dots.npy.
+
+            gt_dots = patch_label_arr_dots_whole[coord[0][0]:coord[0][1], coord[1][0]:coord[1][1]]
+            gt_dmap = patch_label_arr_dots_custom_whole[coord[0][0]:coord[0][1], coord[1][0]:coord[1][1]]
+
+            # Concatenate to have:
+            # channel 0,1,2: img RGB, 
+            # channel 3: inst_map, 
+            # channel 4: class_map
+            # channel 5,6,7: gt_dots  ->  other cells,  healthy epithelial, malignant epithelial 
+            # channel 8,9,10: gt_dmap ->  other cells,  healthy epithelial, malignant epithelial 
+
+            new_gt = np.concatenate((crop_array, gt_dots[...,1:], gt_dmap[...,1:]), axis=-1)
+            new_gt.astype(np.uint8).dump(os.path.join(patches_dir, file))
+
+
 
         
    
@@ -356,9 +368,27 @@ class LabelHandler():
 
         pbar_format = "Process File: |{bar}| {n_fmt}/{total_fmt}[{elapsed}<{remaining},{rate_fmt}]"
         pbarx = tqdm(total=len(files), bar_format=pbar_format, ascii=True, position=0)
+
+        do = ['crag_27',
+        'crag_34',
+        'crag_56',
+        'crag_63',
+        'crag_25',
+        'crag_28',
+        'crag_43',
+        'crag_54']
+
+        if self.save_as_crops:
+            self.win_size = [540,540]
+            self.step_size = [164,164]
+            extractor_func = self._create_gt_files_from_crops 
+        else:
+            extractor_func = self._create_gt_files
         
         for file in files:
-            self._create_gt_files(file)
+            if file['img_id'] not in do: 
+                continue
+            extractor_func(file)
             pbarx.update()
 
         pbarx.close()
@@ -366,28 +396,9 @@ class LabelHandler():
 
 
 if __name__ == "__main__":
-    '''
-        For each image: 
-            Re-scale the patch image and the coordinates of the labelled cell centers. 
-                Save rescaled image as (<out_img_dir>/<img_name>.png)
-                and create a visualization of the cell classes with different colors overlaid on the patch image (saved as <out_gt_dir>/<img_name>_img_with_dots.jpg)
-            Create classification dot annotation map (saved as <out_gt_dir>/<img_name>_gt_dots.npy) 
-            Create detection dot annotation map ( saved as <out_gt_dir>/<img_name>_gt_dots_all.npy) 
-            Generate binary mask, where a Gaussian is created at each cell center. The width of the Gaussian is adaptive such that cells do not intersect. 
-            The Gaussian maps are saved as binary masks by setting all pixels > 0 to 1 and the rest to zero.
-                Classification map file saved as <out_gt_dir>/<img_name>.npy 
-                    and visualization of the binary masks saved as (<out_gt_dir>/<img_name>_s<class_indx>_binary.png )
-                Detection map file saved as <out_gt_dir>/<img_name>_all.npy 
-                    and visualization of the binary masks saved as (<out_gt_dir>/<img_name>_binary.png )
 
-    '''
-    '''
-        Each .mat label file has the keys:
-        'inst_type'
-        'inst_centroid'
-    '''
-
-    args = get_args()
+    
+    args = get_gt_extract_args()
     logger = create_logger()
 
     slurm_job = 'slurm job array' if os.environ.get('SLURM_JOB_ID') else 'local machine'
@@ -395,19 +406,25 @@ if __name__ == "__main__":
     slurm_array_job_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
     logger.info(f'Script started. Running in {slurm_job}. Task ID: {slurm_array_job_id+1} out of {slurm_array_task_count}')
 
-    files = parse_json_file(args.json_info_file_path)
-    files = divide_list(files, slurm_array_task_count)[slurm_array_job_id]
+    file_dict_list = parse_json_file(args.json_info_file_path)
+    file_dict_list = divide_list(file_dict_list, slurm_array_task_count)[slurm_array_job_id]
+
+    img_ids = natsorted([file['img_id'] for file in file_dict_list])
+    logger.info(f'img_ids {img_ids}')
 
     gt_creator = LabelHandler(dataset=args.dataset,
                               nr_types=args.nr_types,
                               n_grouped_class_channels=len(args.grouping_dict) + 1,
                               class_group_mapping_dict=args.grouping_dict, # define mapping of cell classes in input to output
                               color_set={1: (0, 162, 232), 2: (255, 0, 0), 3: (0, 255, 0)}, # lymph: blue,  tumor: red, stromal: green
-                              img_scale=0.5, # Define rescaling rate of images
+                              img_scale=args.img_scale, # Define rescaling rate of images
                               remove_duplicates=False,  # if True will remove duplicate of cells annotated within 5 pixel distance
-                              save_vis=True)
+                              save_vis=False,
+                              save_as_crops=args.save_as_crops)
     
-    gt_creator.create_gt_dataset(files, args.root_dir, args.out_root_dir)
-
-    logger.info('Script finished. All GT files created for the specified dataset.')
+    gt_creator.create_gt_dataset(file_dict_list, args.root_dir, args.out_root_dir)
+    logger.info(f'Script Finished!!')
+    # patches_dirs = [os.path.join(args.root_dir, tile['patches_dir']) for tile in file_dict_list]  
+    
+    # All patch directories can be found @ files[i]['patches_dir']
 

@@ -17,50 +17,15 @@ sys.path.append("/storage/homefs/jg23p152/project/MCSpatNet")
 from spatial_analysis_utils_v2_sh import *
 import logging
 from tqdm import tqdm
+from utils import create_logger, get_kmaps_extract_args, divide_list
 # Calculates the cross K-function at each cell and propagate the same values to all the pixels in the cell connected components in the ground truth dilated dot map or binary mask.
 
-# Configuration Variables
-
-# Configure data input/output paths
 
 
-def get_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--root_dir", type=str, default="/storage/homefs/jg23p152/project",)
-    parser.add_argument("--dataset_path", type=str, help="Path to the dataset folder")
-    parser.add_argument("--out_root_dir", type=str, default="k_func_maps",
-                        help="name of the output folder")
-    # parser.add_argument("--dataset", type=str, default="lizard",
-    #                     help="Name of the dataset")
-    parser.add_argument("--nr_types", type=int, default=3,
-                        help="Number of cell types, not counting background as one type")
-    # parser.add_argument("--grouping_dict", type=str, default="1:1,2:2,3:3")
-
-    args = parser.parse_args()
-    # args.grouping_dict = {int(k): [int(i) for i in v.split('-')] for k, v in [i.split(':') for i in args.grouping_dict.split(',')]}
-    return args
-
-def create_logger():
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    # Write logs to the SLURM output file
-    file_handler = logging.StreamHandler(sys.stdout)
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    return logger
-
-
-def divide_list(lst, n):
-    division_size = len(lst) // n
-    divisions = [lst[i * division_size:(i + 1) * division_size] for i in range(n - 1)]
-    divisions.append(lst[(n - 1) * division_size:])
-    return divisions
 
 if __name__ == "__main__":
 
-    args = get_args()
+    args = get_kmaps_extract_args()
     logger = create_logger()
 
     slurm_job = 'slurm job array' if os.environ.get('SLURM_JOB_ID') else 'local machine'

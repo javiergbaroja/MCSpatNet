@@ -283,7 +283,10 @@ class UnetVggMultihead(nn.Module):
             print('vgg_key', list(vgg_model.state_dict().items())[i][0])
             fsd[temp_key]=list(vgg_model.state_dict().items())[i][1]
             i += 1
-        self.encoder.load_state_dict(fsd)
+
+        load_feedback = self.encoder.load_state_dict(fsd, strict=False)
+        print("Missing Variables: \n", load_feedback[0])
+        print("Detected Unknown Variables: \n", load_feedback[1])
 
         fsd=collections.OrderedDict()
         for m in self.bottleneck.state_dict().items():
@@ -292,9 +295,22 @@ class UnetVggMultihead(nn.Module):
             print('vgg_key', list(vgg_model.state_dict().items())[i][0])
             fsd[temp_key]=list(vgg_model.state_dict().items())[i][1]
             i += 1
-        self.bottleneck.load_state_dict(fsd)
+        load_feedback = self.bottleneck.load_state_dict(fsd, strict=False)
+        print("Missing Variables: \n", load_feedback[0])
+        print("Detected Unknown Variables: \n", load_feedback[1])
+        self.is_finetuning = True
 
-        #del vgg_model
+    def control_encoder_and_bottleneck(self, order:str='freeze', print_info:bool=False):
+        self.is_finetuning = False if order=='freeze' else True
+        for param in self.encoder.parameters():
+            param.requires_grad = False if order=='freeze' else True
+        for param in self.bottleneck.parameters():
+            param.requires_grad = False if order=='freeze' else True
+
+        if print_info:
+            for name, param in self.named_parameters():
+                print(name, '| requires_grad:' , param.requires_grad)
+            print('Encoder and Bottleneck are set to', order)
 
 
 

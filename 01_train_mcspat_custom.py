@@ -446,7 +446,14 @@ if __name__=="__main__":
             logger.info(f'------------validation-loss: {loss_val/len(test_loader):.4f}')
             saved = False
 
-            args.cell_code[len(args.cell_code)+1] = 'detection'
+            last_epoch_filepath = os.path.join(checkpoints_save_path, 'mcspat_last.pth')
+            torch.save({'desc': model.state_dict(), 
+                        'epoch':epoch+1}, 
+                        last_epoch_filepath)  
+            centroids.dump(os.path.join(checkpoints_save_path, 'centroids_last.npy'))
+            
+
+            args.cell_code[len(args.cell_code)] = 'detection'
             precision_all = np.zeros((n_classes_out))
             recall_all = np.zeros((n_classes_out))
             f1_all = np.zeros((n_classes_out))

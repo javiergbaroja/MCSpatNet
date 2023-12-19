@@ -127,8 +127,18 @@ if __name__=="__main__":
                                                    'n_heads':4, 
                                                    'head_classes':[1, n_classes, n_classes2, r_classes_all]}))
     if args.model_param_path is not None:
-        model.load_state_dict(torch.load(args.model_param_path), strict=False);
-        start_epoch = int(args.model_param_path.split('_')[-2])
+        if args.model_param_path.split('_')[-2].isnumeric():
+            start_epoch = int(args.model_param_path.split('_')[-2])
+            model.load_state_dict(torch.load(args.model_param_path, map_location=device), strict=False);
+        else:
+            net_dict = torch.load(args.model_param_path, map_location=device)
+            start_epoch = net_dict['epoch']
+            model.load_state_dict(net_dict['desc'], strict=False);
+            del net_dict
+        centroids = np.load(os.path.join(checkpoints_save_path, 'centroids_last.npy'), allow_pickle=True)
+    else:
+        centroids = None
+    
     model.to(device)
     model.module.control_encoder_and_bottleneck(order='freeze', print_info=True)
     logger.info(f'------Loaded model from {args.model_param_path}. Encoder and bottleneck layers are frozen.')

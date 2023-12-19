@@ -126,19 +126,32 @@ if __name__=="__main__":
     thresh_high = 0.5
     size_thresh = 5
 
+    slurm_job = 'slurm job array' if os.environ.get('SLURM_JOB_ID') else 'local machine'
+    slurm_array_task_count = int(os.environ.get('SLURM_ARRAY_TASK_COUNT', 1))
+    slurm_array_job_id = int(os.environ.get('SLURM_ARRAY_TASK_ID', 0))
+    logger.info(f'Script started. Running in {slurm_job}. Task ID: {slurm_array_job_id+1} out of {slurm_array_task_count}')
+
+    file_dict_list = parse_json_file(args.test_split_filepath)
+    file_dict_list = divide_list(file_dict_list, slurm_array_task_count)[slurm_array_job_id]
+    img_ids = natsorted([file_dict['img_id'] for file_dict in file_dict_list])
+    args.test_split_filepath = os.path.join(out_dir, f"tmp_lst_{os.environ.get('SLURM_JOB_ID')}_{slurm_array_job_id}.json")
+    save_json(os.path.dirname(args.test_split_filepath),os.path.basename(args.test_split_filepath), file_dict_list)
+    logger.info(f'Number of images: {len(img_ids)}')
+    logger.info(f'Image IDs: {img_ids}')
+
     device=torch.device(gpu_or_cpu)
     # model=nn.DataParallel(UnetVggMultihead(kwargs={'dropout_prob':dropout_prob, 'initial_pad':initial_pad, 'interpolate':interpolate, 'conv_init':conv_init, 'n_classes':n_classes, 'n_channels':3, 'n_heads':4, 'head_classes':[1,n_classes,n_classes2, r_classes_all]}))
-    model=UnetVggMultihead(kwargs={'dropout_prob':dropout_prob, 'initial_pad':initial_pad, 'interpolate':interpolate, 'conv_init':conv_init, 'n_classes':n_classes, 'n_channels':3, 'n_heads':4, 'head_classes':[1,n_classes,n_classes2, r_classes_all]})
+    model=UnetVggMultihead(kwargs={'dropout_prob':dropout_prob, 'initial_pad':initial_pad, 'interpolate':interpolate, 'conv_init':conv_init, 'n_classes':n_classes, 'n_channels':3, 'n_heads':4, 'head_classes':[1,n_classes,n_classes2, r_classes_all], 'use_dice_loss':True, 'use_ce_loss':False})
     # model.to(device)
     criterion_sig = nn.Sigmoid() # initialize sigmoid layer
     criterion_softmax = nn.Softmax(dim=1) # initialize sigmoid layer
-    test_dataset=CellsDataset(args.root_dir,class_indx, split_filepath=args.test_split_filepath, phase='test', fixed_size=-1, max_scale=16, return_padding=False)
+    test_dataset=CellsDataset(args.root_dir,class_indx, split_filepath=args.test_split_filepath, phase='test', fixed_size=-1, max_scale=16)
     test_loader=torch.utils.data.DataLoader(test_dataset,batch_size=args.batch_size,shuffle=False)
 
-    print('thresh', thresh_low, thresh_high)
+    logger.info(f'thresh {thresh_low}, {thresh_high}')
 
     # Load model
-    print('test epoch :  Best' )
+    logger.info('test epoch :  Best' )
     
 
     sys.stdout.flush();

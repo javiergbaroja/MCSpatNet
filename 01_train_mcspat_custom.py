@@ -246,7 +246,7 @@ if __name__=="__main__":
                     loss_l1_k = loss_l1_k.sum() / (gt_dmap_all.clone().sum()*r_classes_all) # fake mean reduction over pixels that should be non-zero (focus region)
                     ###########################################################################
 
-                    loss_dice = loss_dice_class + loss_dice_all + lamda_subclasses * loss_dice_subclass
+                    loss_dice = lamda_class*loss_dice_class + lamda_detect*loss_dice_all + lamda_subclasses*loss_dice_subclass
 
                     # Add up the dice loss and the K function L1 loss. The K function can be NAN especially in the beginning of training. Do not add to loss if it is NAN.
                     loss = (lamda_dice * loss_dice )
@@ -334,7 +334,7 @@ if __name__=="__main__":
                         loss_dice_class = loss_dice_class.mean()
                         loss_l1_k = (loss_l1_k.sum() / (gt_dmap_all.clone().sum()*r_classes_all)).item()
 
-                        loss_dice = (loss_dice_class + loss_dice_all).item()
+                        loss_dice = (lamda_class*loss_dice_class + lamda_detect*loss_dice_all).item()
 
                         loss = (lamda_dice * loss_dice )
                         if(not math.isnan(loss_l1_k)):

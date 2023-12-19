@@ -1,19 +1,20 @@
 import os
 import numpy as np
-from skimage import io;
-import cv2 ;
-import sys;
-from skimage.measure import label, moments
+from skimage import io
+import cv2 
+import sys
+from skimage.measure import label
 from skimage import filters
 from tqdm import tqdm as tqdm
 import torch
 import torch.nn as nn
 import glob
 from natsort import natsorted
-from model_arch_custom import UnetVggMultihead_custom as UnetVggMultihead
-from my_dataloader_custom import CellsDataset
+from model_arch_custom2 import UnetVggMultihead_custom as UnetVggMultihead
+from my_dataloader_w_kfunc_custom2 import CellsDataset_test as CellsDataset
 import argparse
 from scipy.io import savemat
+from utils import parse_json_file, divide_list, save_json, create_logger
 
 def get_reconstructed_simple(crop_paths, original_size):
     """To be used for all pngs
@@ -68,7 +69,7 @@ def get_infer_args():
     parser.add_argument('--cropped_data', action='store_true', help='Set if using with pre-cropped data')
     parser.add_argument('--batch_size', type=int, default=40, help='batch size')
     parser.add_argument('--cell_code', type=str, default='1:others,2:epit_healthy,3:epit_maligant', help='dictionary of cell classes')
-
+    parser.add_argument('--del_tiles', action='store_true', help='Set if tile prediction should be deleted')
     parser.add_argument('--seed', type=int, default=123, help='random seed')
 
     args = parser.parse_args()
@@ -78,13 +79,13 @@ def get_infer_args():
 
 if __name__=="__main__":
     args = get_infer_args()
+    logger = create_logger()
     checkpoints_root_dir = args.root_dir # The root directory for all training output.
 
     # checkpoints_folder_name = 'mcspatnet_consep_1' # The name of the current training output folder under <checkpoints_root_dir>.
     out_dir = args.out_dir # The name of the folder that will be created to save the inference output.
     visualize=True # whether to output a visualization of the prediction
     test_data_root = None
-    test_split_filepath = args.test_split_filepath
 
     model_path = args.model_path
     # Initializations
@@ -109,18 +110,18 @@ if __name__=="__main__":
     initial_pad = 126
     interpolate = 'False'
     conv_init = 'he'
-    n_classes = 3
+    n_classes = 4
     n_classes_out = n_classes + 1
-    class_indx = '1,2,3'
+    class_indx = [0,1,2]
     class_weights = np.array([1,1,1]) 
     n_clusters = 5
-    n_classes2 = n_clusters * (n_classes)
+    n_classes2 = n_clusters * (n_classes-1) + 1
 
     r_step = 15
     r_range = range(0, 100, r_step)
     r_arr = np.array([*r_range])
     r_classes = len(r_range)
-    r_classes_all = r_classes * (n_classes )
+    r_classes_all = r_classes * (n_classes-1)
 
     thresh_low = 0.5
     thresh_high = 0.5

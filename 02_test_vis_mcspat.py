@@ -307,34 +307,44 @@ if __name__=="__main__":
                         # io.imsave(os.path.join(out_dir, img_name), (img).astype(np.uint8))
                         #io.imsave(os.path.join(out_dir, img_name.replace('.png','_likelihood_all'+'.png')), (et_all_sig.squeeze()*255).astype(np.uint8));
     
-    paths = [x[0] for x in os.walk(args.out_dir) if os.path.basename(x[0]) != 'mat'][1:]
+    paths = natsorted([x[0] for x in os.walk(args.out_dir) if os.path.basename(x[0]) != 'mat'][1:])
+    paths = [path for path in paths if os.path.basename(path) in img_ids]
+    logger.info('Reconstructing images')
     for path in paths:
         name = os.path.basename(path)
+        logger.info(name)
         for file_end in ['centers_all.npy', '_centers_det_overlay.png', '_centers_s0.npy', '_centers_s1.npy', '_centers_s2.npy','_gt_centers_class_overlay.png', '_centers_class_overlay.png', '_likelihood_class.npy', '_likelihood_all.npy', '_gt_dots_class.npy', '_gt_dots_all.npy']:
             crop_paths = natsorted(glob.glob(os.path.join(path, '*'+file_end), recursive=True))
-            original_size = cv2.imread(glob.glob(os.path.join('/storage/homefs/jg23p152/project/Data', '**', f'*{name}.png'), recursive=True)[0]).shape[:-1]
+            file_ext = 'tif'if 'tcga' in name.lower() else 'png'
+            original_size = cv2.imread([path for path in glob.glob(os.path.join('/storage/homefs/jg23p152/project/Data', '**', f'*{name}.{file_ext}'), recursive=True) if '40x' not in path][0]).shape[:-1]
             crop_paths = [file for file in crop_paths if 'reconstructed' not in file]
+            if len(crop_paths) == 0:
+                continue
             reconstructed = get_reconstructed_simple(crop_paths, original_size)
             
             if '.png' in file_end:
                 io.imsave(os.path.join(path, 'reconstructed_'+file_end), reconstructed.astype(np.uint8))
             else:
                 reconstructed.astype(np.uint8).dump(os.path.join(path, 'reconstructed_'+file_end))
-            for crop_path in crop_paths:
-                os.remove(crop_path)
-    
+            if args.del_tiles:
+                for crop_path in crop_paths:
+                    os.remove(crop_path)
+
+    logger.info('Saving mat files')
     os.makedirs(os.path.join(args.out_dir, 'mat'), exist_ok=True)
     paths = glob.glob(os.path.join(args.out_dir, '**', 'reconstructed__centers_s*.npy'), recursive=True)
-    centers = []
-    names = list(set([os.path.normpath(path).lstrip(os.path.sep).split(os.path.sep)[-2] for path in paths]))
-    labels = []
-    for name in names:
+
+    for name in img_ids:
+        logger.info(name)
+        labels = []
+        centers = []
         paths_tmp = [path for path in paths if name+'/' in path]
         mat_file ={}
-        for i,path in enumerate(paths_tmp):
+        for path in paths_tmp:
+            l = int(os.path.basename(path).split('.npy')[0][-1])
             arr = np.load(path, allow_pickle=True)
-            centers_temp_x, centers_temp_y = np.where(arr != 0)
-            labels.extend([i]*centers_temp_x.shape[0])
+            centers_temp_y, centers_temp_x = np.where(arr != 0)
+            labels.extend([l]*centers_temp_x.shape[0])
             centers.append(np.stack((centers_temp_x, centers_temp_y), axis=1))
         centers = np.concatenate(centers, axis=0)
         labels = np.array(labels)
@@ -342,3 +352,4 @@ if __name__=="__main__":
         mat_file['inst_type'] = labels
         savemat(os.path.join(args.out_dir, 'mat', name+'.mat'), mat_file)
     
+    logger.info('Finished')

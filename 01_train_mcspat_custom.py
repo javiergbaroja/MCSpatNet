@@ -176,6 +176,10 @@ if __name__=="__main__":
     centroids = None
     # scaler = torch.cuda.amp.GradScaler()
     
+    # Define LR scheduling
+    lr_update_epoch = [int(args.start_finetuning*3/4), int(args.epochs*3/4)]
+    lr_bool_updates = [False, False]
+
     with tqdm(range(start_epoch,args.epochs), unit='epoch', desc="Training", dynamic_ncols=True) as epoch_iterator:
         for epoch in epoch_iterator:
             # If epoch already exists then skip
@@ -188,12 +192,28 @@ if __name__=="__main__":
             centroids = perform_clustering(model, simple_train_loader, n_clusters, n_classes, [feature_code['k-cell'], feature_code['subclass']], train_dmap_subclasses_root, centroids, using_crops=args.cropped_data)
             logger.info('------Clustering for pseudo-label generation complete.')
                     
-            # Training phase
-            if epoch + 1 == args.start_finetuning and not model.module.is_finetuning:
+            # Training phase definitions
+            if epoch + 1 >= args.start_finetuning and not model.module.is_finetuning:
                 model.module.control_encoder_and_bottleneck(order='finetune')
                 train_loader=DataLoader(train_dataset, batch_size=args.batch_size[1], shuffle=True, num_workers=14, worker_init_fn=worker_init_fn)
-                logger.info('------Commencing finetuning of encoder.')
-                logger.info(f'------Training set size: {len(train_dataset)} image crops. Dataloader will have {len(train_loader)} batches of size {train_loader.batch_size}.')
+                logger.info(f"------{colored('Commencing finetuning of encoder', color='red', attrs=['bold'])}")
+                logger.info(f'------Training set size: {len(train_dataset)}. Dataloader has {len(train_loader)} batches of size {train_loader.batch_size}. Learning rate is {args.lr[1]}.')
+                for g in optimizer.param_groups:
+                    g['lr'] = args.lr[1]
+
+            elif epoch + 1 >= lr_update_epoch[0] and not lr_bool_updates[0]:
+                for g in optimizer.param_groups:
+                    g['lr'] /= 2
+                lr_bool_updates[0] = True
+                logger.info(f"------Learning rate updated to {g['lr']}.")
+                
+            elif epoch + 1 >= lr_update_epoch[1] and not lr_bool_updates[1]:
+                for g in optimizer.param_groups:
+                    g['lr'] /= 2
+                lr_bool_updates[1] = True
+                logger.info(f"------Learning rate updated to {g['lr']}.")
+
+
             model.train()
 
             # Initialize variables for accumulating loss over the epoch

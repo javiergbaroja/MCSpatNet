@@ -151,151 +151,148 @@ if __name__=="__main__":
     model.to(device)
     model.eval()
     sample_paths = []
+    
     with torch.no_grad():
-
-        for imgs, gt_dmap, gt_dots, img_names in tqdm(test_loader, disable=True):
+        with tqdm(test_loader, unit='batch', desc="Infer", dynamic_ncols=True) as iterator:
+            for imgs, gt_dmap, gt_dmap_all, gt_dots, gt_dots_all, __, img_names in iterator:
             
-            sys.stdout.flush();
+                sys.stdout.flush();
 
-            # Forward Propagation
+                # Forward Propagation
+                loss_dice_all, loss_dice_class, loss_l1_k, et_all_sig, et_class_sig = model(x=imgs,
+                                                                                            gt={'gt_dmap_all':gt_dmap_all.type(torch.FloatTensor),
+                                                                                                'gt_dmap':gt_dmap.type(torch.FloatTensor),
+                                                                                                'gt_dmap_subclasses':None,
+                                                                                                'gt_kmap':torch.zeros((imgs.shape[0], 21, imgs.shape[2], imgs.shape[3]))},
+                                                                                            loss_fns={'criterion_l1_sum':nn.L1Loss(reduction='sum'),
+                                                                                                        'criterion_sig':criterion_sig,
+                                                                                                        'criterion_softmax':criterion_softmax},
+                                                                                            phase='test')
+                imgs = imgs[...,2:-2,2:-2]
 
-            gt_dmap = gt_dmap > 0
-            gt_dmap_all =  gt_dmap.max(dim=1, keepdim=True)[0]
-            gt_dots_all =  gt_dots.max(dim=1, keepdim=True)[0]
-            loss_dice_all, loss_dice_class, loss_l1_k, et_all_sig, et_class_sig = model(x=imgs,
-                                                                                        gt={'gt_dmap_all':gt_dmap_all,
-                                                                                            'gt_dmap':gt_dmap,
-                                                                                            'gt_dmap_subclasses':None,
-                                                                                            'gt_kmap':{'tensor':torch.zeros((imgs.shape[0], 21, imgs.shape[2], imgs.shape[3])), 'r_classes_all':r_classes_all}},
-                                                                                        loss_fns={'criterion_l1_sum':nn.L1Loss(reduction='sum'),
-                                                                                                    'criterion_sig':criterion_sig,
-                                                                                                    'criterion_softmax':criterion_softmax},
-                                                                                        phase='test')
-            imgs = imgs[...,2:-2,2:-2]
+                gt_dmap_all = gt_dmap_all[...,2:-2,2:-2]
+                gt_dmap = gt_dmap[...,2:-2,2:-2]
+                gt_dots = gt_dots[...,2:-2,2:-2]
+                gt_dots_all = gt_dots_all[...,2:-2,2:-2]
 
-            gt_dmap_all = gt_dmap_all[...,2:-2,2:-2]
-            gt_dmap = gt_dmap[...,2:-2,2:-2]
-            gt_dots = gt_dots[...,2:-2,2:-2]
-            gt_dots_all = gt_dots_all[...,2:-2,2:-2]
+                et_all_sig = et_all_sig[...,2:-2,2:-2]
+                et_class_sig = et_class_sig[...,2:-2,2:-2]
+                
+                for j in range(len(imgs)):
+                    img = imgs[j].cpu().permute(1,2,0).numpy()*255
 
-            et_all_sig = et_all_sig[...,2:-2,2:-2]
-            et_class_sig = et_class_sig[...,2:-2,2:-2]
-            
-            for j in range(len(imgs)):
-                img = imgs[j].cpu().permute(1,2,0).numpy()*255
+                    et_all_sig_single = et_all_sig[j].cpu().permute(1,2,0).numpy()
+                    et_class_sig_single = et_class_sig[j].cpu().permute(1,2,0).numpy()
 
-                et_all_sig_single = et_all_sig[j].cpu().permute(1,2,0).numpy()
-                et_class_sig_single = et_class_sig[j].cpu().permute(1,2,0).numpy()
-
-                gt_dots_single = gt_dots[j].cpu().permute(1,2,0).numpy()
-                gt_dots_all_single = gt_dots_all[j].cpu().permute(1,2,0).numpy()
-                gt_dmap_single = gt_dmap_all[j].cpu().permute(1,2,0).numpy()
+                    gt_dots_single = gt_dots[j].cpu().permute(1,2,0).numpy()
+                    gt_dots_all_single = gt_dots_all[j].cpu().permute(1,2,0).numpy()
+                    gt_dmap_single = gt_dmap_all[j].cpu().permute(1,2,0).numpy()
 
 
-                img_centers_all = img.copy()
-                img_centers_all_gt = img.copy()
+                    img_centers_all = img.copy()
+                    img_centers_all_gt = img.copy()
 
-                img_centers_all_all = img.copy()
-                img_centers_all_all_gt = img.copy()
+                    img_centers_all_all = img.copy()
+                    img_centers_all_all_gt = img.copy()
 
-                img_name = os.path.normpath(img_names[j]).split(os.path.sep)[-2:]
-                img_name = os.path.join(img_name[0], img_name[1])
-                sample_path = os.path.join(out_dir, os.path.dirname(img_name))
-                os.makedirs(sample_path, exist_ok=True)
-                sample_paths.append(sample_path)
+                    img_name = os.path.normpath(img_names[j]).split(os.path.sep)[-2:]
+                    img_name = os.path.join(img_name[0], img_name[1])
+                    sample_path = os.path.join(out_dir, os.path.dirname(img_name))
+                    os.makedirs(sample_path, exist_ok=True)
+                    sample_paths.append(sample_path)
 
-                g_count = gt_dots_all_single.sum()
-                # Get connected components in the prediction and apply a small size threshold
-                e_hard = filters.apply_hysteresis_threshold(et_all_sig_single.squeeze(), thresh_low, thresh_high)
-                e_hard2 = (e_hard > 0).astype(np.uint8)
-                comp_mask = label(e_hard2)
-                e_count = comp_mask.max()
-                s_count=0
-                if(size_thresh > 0):
-                    for c in range(1,comp_mask.max()+1):
-                        s = (comp_mask == c).sum()
-                        if(s < size_thresh):
-                            e_count -=1
-                            s_count +=1
-                            e_hard2[comp_mask == c] = 0
-                e_hard2_all = e_hard2.copy()
+                    g_count = gt_dots_all_single.sum()
+                    # Get connected components in the prediction and apply a small size threshold
+                    e_hard = filters.apply_hysteresis_threshold(et_all_sig_single.squeeze(), thresh_low, thresh_high)
+                    e_hard2 = (e_hard > 0).astype(np.uint8)
+                    comp_mask = label(e_hard2)
+                    e_count = comp_mask.max()
+                    s_count=0
+                    if(size_thresh > 0):
+                        for c in range(1,comp_mask.max()+1):
+                            s = (comp_mask == c).sum()
+                            if(s < size_thresh):
+                                e_count -=1
+                                s_count +=1
+                                e_hard2[comp_mask == c] = 0
+                    e_hard2_all = e_hard2.copy()
 
-                # Get centers of connected components in the prediction
-                e_dot = np.zeros((img.shape[0], img.shape[1]))
-                e_dot_vis = np.zeros((img.shape[0], img.shape[1]))
-                contours, hierarchy = cv2.findContours(e_hard2, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-                for idx in range(len(contours)):
-                    contour_i = contours[idx]
-                    M = cv2.moments(contour_i)
-                    if(M['m00'] == 0):
-                        continue;
-                    cx = round(M['m10'] / M['m00'])
-                    cy = round(M['m01'] / M['m00'])
-                    e_dot_vis[cy-1:cy+1, cx-1:cx+1] = 1
-                    e_dot[min(cy, e_dot.shape[0]-1), min(cx, e_dot.shape[1]-1)] = 1
-                    img_centers_all_all[cy-3:cy+3, cx-3:cx+3,:] = (0,0,0)
-                e_dot_all = e_dot.copy()
-                gt_centers = np.where(gt_dots_all_single > 0)
-                for idx in range(len(gt_centers[0])):
-                    cx = gt_centers[1][idx]
-                    cy = gt_centers[0][idx]
-                    img_centers_all_all_gt[cy-3:cy+3, cx-3:cx+3,:] = (0,0,0)
-
-                e_dot.astype(np.uint8).dump(
-                    os.path.join(out_dir, img_name.replace('.npy',  '_centers' + '_all' + '.npy')))
-                if visualize:
-                    #io.imsave(os.path.join(out_dir, img_name.replace('.npy','_centers'+'_allcells' +'.png')), (e_dot_vis*255).astype(np.uint8))
-                    io.imsave(os.path.join(out_dir, img_name.replace('.npy','_centers'+'_det' +'_overlay.png')), (img_centers_all_all).astype(np.uint8))
-                    #io.imsave(os.path.join(out_dir, img_name.replace('.npy','_allcells' +'_hard.png')), (e_hard2*255).astype(np.uint8))
-
-                # end: eval detection all
-
-                # begin: eval classification
-                et_class_argmax = et_class_sig_single.argmax(axis=-1)
-                e_hard2_all = e_hard2.copy()
-
-                for s in range(n_classes):
-                    g_count = gt_dots_single[...,s].sum()
-                    e_hard2 = (et_class_argmax == s)
-
-                    # Filter the predicted detection dot map by the current class predictions
-                    e_dot = e_hard2 * e_dot_all
-                    e_count = e_dot.sum()
-
-                    g_dot = gt_dots_single[...,s]
-                    e_dot_vis = np.zeros(g_dot.shape)
-                    e_dots_tuple = np.where(e_dot > 0)
-                    for idx in range(len(e_dots_tuple[0])):
-                        cy=e_dots_tuple[0][idx]
-                        cx=e_dots_tuple[1][idx]
-                        img_centers_all[cy-3:cy+3, cx-3:cx+3,:] = color_set[s]
-
-
-                    gt_centers = np.where(g_dot > 0)
+                    # Get centers of connected components in the prediction
+                    e_dot = np.zeros((img.shape[0], img.shape[1]))
+                    e_dot_vis = np.zeros((img.shape[0], img.shape[1]))
+                    contours, hierarchy = cv2.findContours(e_hard2, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                    for idx in range(len(contours)):
+                        contour_i = contours[idx]
+                        M = cv2.moments(contour_i)
+                        if(M['m00'] == 0):
+                            continue;
+                        cx = round(M['m10'] / M['m00'])
+                        cy = round(M['m01'] / M['m00'])
+                        e_dot_vis[cy-1:cy+1, cx-1:cx+1] = 1
+                        e_dot[min(cy, e_dot.shape[0]-1), min(cx, e_dot.shape[1]-1)] = 1
+                        img_centers_all_all[cy-3:cy+3, cx-3:cx+3,:] = (0,0,0)
+                    e_dot_all = e_dot.copy()
+                    gt_centers = np.where(gt_dots_all_single > 0)
                     for idx in range(len(gt_centers[0])):
                         cx = gt_centers[1][idx]
                         cy = gt_centers[0][idx]
-                        img_centers_all_gt[cy-3:cy+3, cx-3:cx+3,:] = color_set[s]
+                        img_centers_all_all_gt[cy-3:cy+3, cx-3:cx+3,:] = (0,0,0)
 
-                    e_dot.astype(np.uint8).dump(os.path.join(out_dir, img_name.replace('.npy', '_centers' + '_s' + str(s) + '.npy')))
-                    #if(visualize):
-                    #    io.imsave(os.path.join(out_dir, img_name.replace('.npy','_likelihood_s'+ str(s)+'.png')), (et_class_sig.squeeze()[s]*255).astype(np.uint8));
-                # end: eval classification
+                    e_dot.astype(np.uint8).dump(
+                        os.path.join(out_dir, img_name.replace('.npy',  '_centers' + '_all' + '.npy')))
+                    if visualize:
+                        #io.imsave(os.path.join(out_dir, img_name.replace('.npy','_centers'+'_allcells' +'.png')), (e_dot_vis*255).astype(np.uint8))
+                        io.imsave(os.path.join(out_dir, img_name.replace('.npy','_centers'+'_det' +'_overlay.png')), (img_centers_all_all).astype(np.uint8))
+                        #io.imsave(os.path.join(out_dir, img_name.replace('.npy','_allcells' +'_hard.png')), (e_hard2*255).astype(np.uint8))
+
+                    # end: eval detection all
+
+                    # begin: eval classification
+                    et_class_argmax = et_class_sig_single.argmax(axis=-1)
+                    e_hard2_all = e_hard2.copy()
+
+                    for s in range(n_classes-1):
+                        g_count = gt_dots_single[...,s].sum() # gt_dots does not have background class as 0
+                        e_hard2 = (et_class_argmax == s+1) # et_class has background class as 0
+
+                        # Filter the predicted detection dot map by the current class predictions
+                        e_dot = e_hard2 * e_dot_all
+                        e_count = e_dot.sum()
+
+                        g_dot = gt_dots_single[...,s]
+                        e_dot_vis = np.zeros(g_dot.shape)
+                        e_dots_tuple = np.where(e_dot > 0)
+                        for idx in range(len(e_dots_tuple[0])):
+                            cy=e_dots_tuple[0][idx]
+                            cx=e_dots_tuple[1][idx]
+                            img_centers_all[cy-3:cy+3, cx-3:cx+3,:] = color_set[s]
 
 
-                et_class_sig_single.astype(np.float16).dump(
-                    os.path.join(out_dir, img_name.replace('.npy', '_likelihood_class' + '.npy')))
-                et_all_sig_single.astype(np.float16).dump(
-                    os.path.join(out_dir, img_name.replace('.npy', '_likelihood_all' + '.npy')))
-                gt_dots_single.astype(np.uint8).dump(
-                    os.path.join(out_dir, img_name.replace('.npy', '_gt_dots_class' + '.npy')))
-                gt_dots_all_single.astype(np.uint8).dump(
-                    os.path.join(out_dir, img_name.replace('.npy', '_gt_dots_all' + '.npy')))
-                if(visualize):
-                    io.imsave(os.path.join(out_dir, img_name.replace('.npy','_centers'+ '_class_overlay' +'.png')), (img_centers_all).astype(np.uint8))
-                    io.imsave(os.path.join(out_dir, img_name.replace('.npy','_gt_centers'+'_class_overlay'+'.png')), (img_centers_all_gt).astype(np.uint8))
-                    # io.imsave(os.path.join(out_dir, img_name), (img).astype(np.uint8))
-                    #io.imsave(os.path.join(out_dir, img_name.replace('.png','_likelihood_all'+'.png')), (et_all_sig.squeeze()*255).astype(np.uint8));
+                        gt_centers = np.where(g_dot > 0)
+                        for idx in range(len(gt_centers[0])):
+                            cx = gt_centers[1][idx]
+                            cy = gt_centers[0][idx]
+                            img_centers_all_gt[cy-3:cy+3, cx-3:cx+3,:] = color_set[s]
+
+                        e_dot.astype(np.uint8).dump(os.path.join(out_dir, img_name.replace('.npy', '_centers' + '_s' + str(s) + '.npy')))
+                        #if(visualize):
+                        #    io.imsave(os.path.join(out_dir, img_name.replace('.npy','_likelihood_s'+ str(s)+'.png')), (et_class_sig.squeeze()[s]*255).astype(np.uint8));
+                    # end: eval classification
+
+
+                    et_class_sig_single.astype(np.float16).dump(
+                        os.path.join(out_dir, img_name.replace('.npy', '_likelihood_class' + '.npy')))
+                    et_all_sig_single.astype(np.float16).dump(
+                        os.path.join(out_dir, img_name.replace('.npy', '_likelihood_all' + '.npy')))
+                    gt_dots_single.astype(np.uint8).dump(
+                        os.path.join(out_dir, img_name.replace('.npy', '_gt_dots_class' + '.npy')))
+                    gt_dots_all_single.astype(np.uint8).dump(
+                        os.path.join(out_dir, img_name.replace('.npy', '_gt_dots_all' + '.npy')))
+                    if(visualize):
+                        io.imsave(os.path.join(out_dir, img_name.replace('.npy','_centers'+ '_class_overlay' +'.png')), (img_centers_all).astype(np.uint8))
+                        io.imsave(os.path.join(out_dir, img_name.replace('.npy','_gt_centers'+'_class_overlay'+'.png')), (img_centers_all_gt).astype(np.uint8))
+                        # io.imsave(os.path.join(out_dir, img_name), (img).astype(np.uint8))
+                        #io.imsave(os.path.join(out_dir, img_name.replace('.png','_likelihood_all'+'.png')), (et_all_sig.squeeze()*255).astype(np.uint8));
     
     paths = [x[0] for x in os.walk(args.out_dir) if os.path.basename(x[0]) != 'mat'][1:]
     for path in paths:

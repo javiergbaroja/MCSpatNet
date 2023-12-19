@@ -113,10 +113,10 @@ if __name__=="__main__":
     r_classes_all = r_classes * (n_classes ) # number of output channels for the K function over all classes
 
     k_norm_factor = 100 # the maximum K-value (i.e. number of nearby cells at radius r) to normalize the K-func to [0,1]
-    lamda_dice = 1;  # weight for dice loss for main output channels (cell detection + cell classification)
-    lamda_subclasses = 1 # weight for dice loss for secondary output channels (cell cluster classification)
-    lamda_k = 1 # weight for L1 loss for K function regression
-
+    lamda_class = args.lamda_class;  # weight for dice loss for cell classification
+    lamda_detect = args.lamda_detect # weight for dice loss for cell detection 
+    lamda_subclasses = args.lamda_subclass # weight for dice loss for secondary output channels (cell cluster classification)
+    lamda_k = args.lamda_kfunc # weight for L1 loss for K function regression
 
     model=nn.DataParallel(UnetVggMultihead(kwargs={'dropout_prob':dropout_prob, 
                                                    'initial_pad':initial_pad, 

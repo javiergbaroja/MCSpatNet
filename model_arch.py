@@ -6,9 +6,10 @@ import collections
 from distutils.util import strtobool;
 import numpy as np  
 
+from utils import create_logger
 from sa_net_arch_utilities_pytorch import CNNArchUtilsPyTorch;
 
-
+logger = create_logger('UnetVggMultihead')
 class UnetVggMultihead(nn.Module):
     def __init__(self, load_weights=False, kwargs=None):
         super(UnetVggMultihead,self).__init__()
@@ -147,12 +148,12 @@ class UnetVggMultihead(nn.Module):
 
 
         self._initialize_weights()
-
-        self.zero_grad() ;
-
-        print('self.encoder',self.encoder)
-        print('self.bottleneck',self.bottleneck)
-        print('self.decoder',self.decoder)
+        self.zero_grad() 
+        
+        logger.info('----------------Model Architecture:')
+        logger.info(f'------self.encoder \n{self.encoder}')
+        logger.info(f'------self.bottleneck \n{self.bottleneck}')
+        logger.info(f'------self.decoder \n{self.decoder}')
 
 
     def forward(self,x, feat_indx_list=[], feat_as_dict=False):
@@ -188,30 +189,30 @@ class UnetVggMultihead(nn.Module):
         # Check if decoder features will be returned in output
         if(feat_indx in feat_indx_list):
             if(feat_as_dict):
-                feat_dict[feat_indx] = x.detach().cpu().numpy()
+                feat_dict[feat_indx] = x#.detach().cpu().numpy()
             else:
-                feat = x.detach().cpu().numpy()
+                feat = x#.detach().cpu().numpy()
         
         c=[]
-        f=None
+        # f=None
         for layer in self.final_layers_lst:
             feat_indx += 1
             f1 = layer[0](x) # output features from current head
             c.append(layer[1](f1)) # output prediction from current head
-            if(f is None):
-                f = f1
-            else:
-                f = torch.cat((f1, f), 1) ;
+            # if(f is None):
+            #     f = f1
+            # else:
+            #     f = torch.cat((f1, f), 1) ;
 
             # Check if current head features will be returned in output
             if(feat_indx in feat_indx_list):
                 if(feat_as_dict):
-                    feat_dict[feat_indx] = f1.detach().cpu().numpy()
+                    feat_dict[feat_indx] = f1#.detach().cpu().numpy()
                 else:
                     if(feat is None):
-                        feat = f1.detach().cpu().numpy()
+                        feat = f1#.detach().cpu().numpy()
                     else:
-                        feat= np.concatenate((feat, f1.detach().cpu().numpy()), axis=1)
+                        feat= torch.cat((feat, f1),dim=1)#np.concatenate((feat, f1.detach().cpu().numpy()), axis=1)
 
         # If no features requested, then just return predictions list
         if(len(feat_indx_list) == 0):
@@ -274,7 +275,7 @@ class UnetVggMultihead(nn.Module):
 
 
         # Initialize encoder and bottleneck from VGG-16 pretrained model
-        vgg_model = models.vgg16(pretrained = True)
+        vgg_model = models.vgg16(weights = models.vgg.VGG16_Weights.DEFAULT)
         fsd=collections.OrderedDict()
         i = 0
         for m in self.encoder.state_dict().items():

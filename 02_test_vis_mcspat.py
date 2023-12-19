@@ -10,8 +10,8 @@ import torch
 import torch.nn as nn
 import glob
 from natsort import natsorted
-from model_arch_custom2 import UnetVggMultihead_custom as UnetVggMultihead
-from my_dataloader_w_kfunc_custom2 import CellsDataset_test as CellsDataset
+from MCSpatNet.model_arch_custom import UnetVggMultihead_custom as UnetVggMultihead
+from my_dataloader_w_kfunc_custom import CellsDataset_test as CellsDataset
 import argparse
 from scipy.io import savemat
 from utils import parse_json_file, divide_list, save_json, create_logger

@@ -26,7 +26,9 @@ class LabelHandler():
                  type2subtype:int=2,
                  remove_duplicates:bool=False,
                  save_vis:bool=True,
-                 save_as_crops:bool=False) -> None:
+                 save_as_crops:bool=False,
+                 window_size:int=540,
+                 step_size:int=164) -> None:
         
         
         self.dataset = dataset
@@ -43,8 +45,8 @@ class LabelHandler():
         self.root_dir = None
         self.out_img_dir = None
         self.out_gt_dir = None
-        self.win_size=[] 
-        self.step_size=[]
+        self.win_size=[window_size,window_size] 
+        self.step_size=[step_size,step_size]
         
 
         if dataset.lower() == "tcga":
@@ -359,7 +361,7 @@ class LabelHandler():
 
 
 
-        
+
    
     def create_gt_dataset(self, files:list, root_dir:str, out_dir:str):
 
@@ -369,25 +371,13 @@ class LabelHandler():
         pbar_format = "Process File: |{bar}| {n_fmt}/{total_fmt}[{elapsed}<{remaining},{rate_fmt}]"
         pbarx = tqdm(total=len(files), bar_format=pbar_format, ascii=True, position=0)
 
-        do = ['crag_27',
-        'crag_34',
-        'crag_56',
-        'crag_63',
-        'crag_25',
-        'crag_28',
-        'crag_43',
-        'crag_54']
-
         if self.save_as_crops:
-            self.win_size = [540,540]
-            self.step_size = [164,164]
+
             extractor_func = self._create_gt_files_from_crops 
         else:
             extractor_func = self._create_gt_files
         
         for file in files:
-            if file['img_id'] not in do: 
-                continue
             extractor_func(file)
             pbarx.update()
 
@@ -420,7 +410,9 @@ if __name__ == "__main__":
                               img_scale=args.img_scale, # Define rescaling rate of images
                               remove_duplicates=False,  # if True will remove duplicate of cells annotated within 5 pixel distance
                               save_vis=False,
-                              save_as_crops=args.save_as_crops)
+                              save_as_crops=args.save_as_crops,
+                              window_size=args.window_size,
+                              step_size=args.step_size,)
     
     gt_creator.create_gt_dataset(file_dict_list, args.root_dir, args.out_root_dir)
     logger.info(f'Script Finished!!')

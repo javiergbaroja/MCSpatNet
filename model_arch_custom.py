@@ -103,7 +103,7 @@ class UnetVggMultihead_custom(UnetVggMultihead):
         et_dmap_lst, feats = self.forward_net(x, feat_indx_list, feat_as_dict)
         # If no features requested, then just return predictions list
 
-        if len(feat_indx_list) != 0:
+        if len(feat_indx_list) != 0 or phase=='infer':
             return et_dmap_lst, feats
 
         et_dmap_all=et_dmap_lst[0][:,:,2:-2,2:-2] # The cell detection prediction

@@ -13,6 +13,7 @@ import random
 def get_npy_files(root_dir, file_type='npy'):
     # Use glob to find all .npy files in root_dir and its subdirectories
     npy_files = glob.glob(os.path.join(root_dir, '**', f'*.{file_type}'), recursive=True)
+
     return natsorted(npy_files)
 
 def get_kmaps_extract_args():
@@ -45,7 +46,8 @@ def get_gt_extract_args():
     parser.add_argument("--grouping_dict", type=str, default="1:1,2:2,3:3")
     parser.add_argument("--img_scale", type=float, default=1.0)
     parser.add_argument("--save_as_crops", action='store_true', help='Set to save GT atcrop level instead of image level')
-
+    parser.add_argument("--window_size", type=int, default=540, help='Size of the window to crop')
+    parser.add_argument("--step_size", type=int, default=164, help='Step size for cropping')
     args = parser.parse_args()
     args.grouping_dict = {int(k): [int(i) for i in v.split('-')] for k, v in [i.split(':') for i in args.grouping_dict.split(',')]}
     return args

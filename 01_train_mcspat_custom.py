@@ -6,7 +6,7 @@ import os
 import glob
 import math
 from tqdm import tqdm
-from natsort import natsorted
+import shutil
 from termcolor import colored
 from collections import Counter
 import time
@@ -16,9 +16,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-import cv2
 from skimage import filters
-from skimage.measure import label, moments, regionprops_table
+from skimage.measure import label, regionprops_table
 
 from utils import get_train_args, create_logger, empty_trash, seed_everything
 from model_arch_custom import UnetVggMultihead_custom as UnetVggMultihead
@@ -95,7 +94,7 @@ if __name__=="__main__":
     n_classes_out = n_classes + 1 # number of output classes = number of cell classes (lymphocytes, tumor, stromal) + 1 (for cell detection channel)
     class_indx = '1,2,3' # the index of the classes channels in the ground truth
     n_clusters = 5 # number of clusters per class
-    n_classes_deep_clustering = n_clusters * n_classes # number of output classes for the cell cluster classification
+    n_classes_deep_clustering = 1 + n_clusters * n_classes # number of output classes for the cell cluster classification + 1 (for background)
 
     prints_per_epoch=1 # print frequency per epoch
 
@@ -119,9 +118,14 @@ if __name__=="__main__":
                                                    'n_classes':n_classes, 
                                                    'n_channels':n_channels, 
                                                    'n_heads':4, 
-                                                   'head_classes':[1, n_classes, n_classes_deep_clustering, k_func_dim],
+                                                   'head_classes':[1, n_classes_out, n_classes_deep_clustering, k_func_dim],
                                                    'use_dice_loss':args.use_dice_loss,
                                                    'use_ce_loss':args.use_ce_loss}))
+    # load pretrained model
+    if args.pretrained_model_path is not None:
+        model.load_state_dict(torch.load(args.pretrained_model_path, map_location=device), strict=True)
+        logger.info(f'------Pretrained model loaded from {args.pretrained_model_path}.')
+    # continue training from a previous checkpoint
     if args.model_param_path is not None:
         if args.model_param_path.split('_')[-2].isnumeric():
             start_epoch = int(args.model_param_path.split('_')[-2])
@@ -180,6 +184,8 @@ if __name__=="__main__":
     # Define LR scheduling
     lr_update_epoch = [int(args.start_finetuning*3/4), int(args.epochs*3/4)]
     lr_bool_updates = [False, False]
+
+    shutil.copy(__file__, os.path.join(args.checkpoints_root_dir, time.strftime("%Y-%m-%d_%H%M")+'_train_script.py'))
 
     with tqdm(range(start_epoch,args.epochs), unit='epoch', desc="Training", dynamic_ncols=True) as epoch_iterator:
         for epoch in epoch_iterator:

@@ -58,6 +58,7 @@ def get_train_args():
     parser.add_argument('--checkpoints_root_dir', type=str, default='/storage/homefs/jg23p152/project/MCSpatNet/MCSpatNet_checkpoints', help='The root directory for all training output.')
     parser.add_argument('--checkpoints_folder_name', type=str, default='mcspatnet_consep_1', help='The name of the folder that will be created under <checkpoints_root_dir> to hold output from current training instance.')
     parser.add_argument('--model_param_path', type=str, default=None, help='path of a previous checkpoint to continue training')
+    parser.add_argument('--pretrained_model_path', type=str, default=None, help='path of a pretrained model to initialize the network')
     parser.add_argument('--clustering_pseudo_gt_root', type=str, default='/storage/homefs/jg23p152/project/MCSpatNet/MCSpatNet_epoch_subclasses', help='path to save clustering pseudo ground truth')
     parser.add_argument('--train_data_root', type=str, default='/storage/homefs/jg23p152/project/MCSpatNet/datasets/Lizard', help='path to training data')
     parser.add_argument('--test_data_root', type=str, default='/storage/homefs/jg23p152/project/MCSpatNet/datasets/Lizard', help='path to testing data')

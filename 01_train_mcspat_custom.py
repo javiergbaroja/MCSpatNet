@@ -242,7 +242,7 @@ if __name__=="__main__":
                     gt_dmap = gt_dmap > 0
                     gt_dmap_subclasses = gt_dmap_subclasses > 0
                     # Get the detection ground truth maps from the classes ground truth maps
-                    gt_dmap_all =  gt_dmap.max(dim=1, keepdim=True)[0]
+                    gt_dmap_all =  gt_dmap[:,1:,...].max(dim=1, keepdim=True)[0]
                     # Set datatype and move to GPU
                     gt_dmap = gt_dmap.type(torch.FloatTensor)
                     gt_dmap_all = gt_dmap_all.type(torch.FloatTensor)
@@ -330,7 +330,7 @@ if __name__=="__main__":
                         # Convert ground truth maps to binary masks (in case they were density maps)
                         gt_dmap = gt_dmap > 0
                         # Get the detection ground truth maps from the classes ground truth maps
-                        gt_dmap_all =  gt_dmap.max(dim=1, keepdim=True)[0]
+                        gt_dmap_all =  gt_dmap[:,1:,...].max(dim=1, keepdim=True)[0]
                         gt_dots_all =  gt_dots.max(dim=1, keepdim=True)[0]
                         # Set datatype and move to GPU
                         gt_dmap = gt_dmap.type(torch.FloatTensor)
@@ -375,7 +375,7 @@ if __name__=="__main__":
                         # Calculate F-score if epoch >= epoch_start_eval_prec
                         if(epoch >= epoch_start_eval_prec):
                             
-                            for k in range(gt_dots_all.shape[0]):
+                            for k in range(gt_dots_all.shape[0]): # iterate over batch samples
                                 # Apply a 0.5 threshold on detection output and convert to binary mask
                                 e_hard2 = filters.apply_hysteresis_threshold(et_all_sig[k].squeeze(0), 0.5, 0.5)            
                                 e_hard2 = (e_hard2 > 0).astype(np.uint8)
@@ -413,7 +413,7 @@ if __name__=="__main__":
                                 for s in range(n_classes):
 
                                     et_class_argmax = et_class_sig[k].argmax(axis=0)
-                                    e_hard2 = (et_class_argmax == s)  
+                                    e_hard2 = (et_class_argmax == s+1)  
                                     g_dot = gt_dots[k,s,...]
 
                                     e_dot = (e_hard2 * e_dot_all)

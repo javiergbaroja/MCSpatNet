@@ -65,6 +65,13 @@ class CellsDataset_base(Dataset):
     def _apply_ver_flip(self, arr:np.ndarray):
         return arr[::-1,:].copy()
     
+    def _add_background_channel(self, tensor:torch.Tensor)->torch.Tensor:
+        background_channel = torch.ones_like(tensor[0,:,:])
+        background_channel[tensor[0,:,:]>0] = 0
+        tensor = torch.cat((background_channel.unsqueeze(0), tensor), dim=0)
+        return tensor
+
+    
     def __len__(self):
         return self.n_samples
     
@@ -201,6 +208,9 @@ class CellsDataset_test(CellsDataset_base):
             # Add padding to make sure image dimensions are divisible by max_scale
             if self.max_scale > 1: # to downsample image and density-map to match deep-model.
                 img, gt_dmap, gt_dots, gt_kmap = self._apply_padding(img, gt_dmap, gt_dots, gt_kmap)
+
+            # Add background channel in position 0 of axis 0 for gt_dmap
+            gt_dmap = self._add_background_channel(gt_dmap)
             
             return img, gt_dmap, gt_dots, gt_kmap, img_name
 
@@ -276,7 +286,11 @@ class CellsDataset_train(CellsDataset_base):
         # Add padding to make sure image dimensions are divisible by max_scale
         if self.max_scale > 1: # to downsample image and density-map to match deep-model.
             img, gt_dmap, gt_subclasses_dmap, gt_kmap = self._apply_padding(img, gt_dmap, gt_subclasses_dmap, gt_kmap)
-        
+
+        # Add background channel in position 0 of axis 0 for gt_dmap and gt_subclasses_dmap
+        gt_dmap = self._add_background_channel(gt_dmap)
+        gt_subclasses_dmap = self._add_background_channel(gt_subclasses_dmap)
+
         return img ,gt_dmap, gt_subclasses_dmap, gt_kmap, img_name
     
 
